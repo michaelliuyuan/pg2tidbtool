@@ -34,7 +34,7 @@ func (s SourceConfig) DSN() string {
 		sslmode = "disable"
 	}
 	return fmt.Sprintf("postgresql://%s:%s@%s:%d/%s?sslmode=%s",
-		url.UserEscape(s.User), url.UserEscape(s.Password), s.Host, s.Port, s.Database, sslmode)
+		url.QueryEscape(s.User), url.QueryEscape(s.Password), s.Host, s.Port, s.Database, sslmode)
 }
 
 type TargetConfig struct {

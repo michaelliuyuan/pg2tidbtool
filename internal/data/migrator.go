@@ -346,10 +346,13 @@ func (m *Migrator) loadCSVToTiDB(ctx context.Context, db *sql.DB, table, csvPath
 	mysql.RegisterLocalFile(csvPath)
 	defer mysql.DeregisterLocalFile(csvPath)
 
-	query := fmt.Sprintf("LOAD DATA LOCAL INFILE ? INTO TABLE %s FIELDS TERMINATED BY '\\t' LINES TERMINATED BY '\\n'",
-		quoteMySQL(table))
+	safePath := strings.ReplaceAll(csvPath, "\\", "\\\\")
+	safePath = strings.ReplaceAll(safePath, "'", "\\'")
 
-	_, err := db.ExecContext(ctx, query, csvPath)
+	query := fmt.Sprintf("LOAD DATA LOCAL INFILE '%s' INTO TABLE %s FIELDS TERMINATED BY '\\t' LINES TERMINATED BY '\\n'",
+		safePath, quoteMySQL(table))
+
+	_, err := db.ExecContext(ctx, query)
 	return err
 }
 

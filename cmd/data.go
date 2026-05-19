@@ -27,7 +27,7 @@ var dataCmd = &cobra.Command{
 
 		logLevel, _ := cmd.Flags().GetString("log-level")
 		logFormat, _ := cmd.Flags().GetString("log-format")
-		logger.Init(logLevel, logFormat, cfg.Logging.Output)
+		logger.InitWithOutput(logLevel, logFormat, cfg.Logging.Output)
 		defer logger.Sync()
 
 		parallel, _ := cmd.Flags().GetInt("parallel")

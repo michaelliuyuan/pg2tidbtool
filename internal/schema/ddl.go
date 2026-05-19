@@ -39,10 +39,15 @@ func (b *DDLBuilder) BuildTableDDL(table TableInfo) error {
 
 	for _, col := range table.Columns {
 		if col.Comment != "" {
+			mysqlType := MapTypeWithPrecision(col.PGType, col.MaxLength, col.NumericScale)
+			if mysqlType == "" {
+				mysqlType = "TEXT"
+			}
 			b.statements = append(b.statements, fmt.Sprintf(
-				"ALTER TABLE %s MODIFY COLUMN %s COMMENT '%s'",
+				"ALTER TABLE %s MODIFY COLUMN %s %s COMMENT '%s'",
 				QuoteIdentifier(table.Name),
 				QuoteIdentifier(col.ColumnName),
+				mysqlType,
 				escapeSQLString(col.Comment),
 			))
 		}
@@ -184,9 +189,21 @@ func convertDefaultValue(pgDefault string, pgType PGType) string {
 		return "1"
 	case strings.ToUpper(d) == "FALSE":
 		return "0"
-	case strings.HasPrefix(d, "'") && strings.HasSuffix(d, "'::"):
-		return "'" + strings.TrimSuffix(strings.TrimPrefix(d, "'"), "'::"+string(pgType)+"'") + "'"
 	}
+
+	if idx := strings.Index(d, "::"); idx > 0 {
+		raw := d[:idx]
+		raw = strings.TrimSpace(raw)
+		if strings.HasPrefix(raw, "'") && strings.HasSuffix(raw, "'") {
+			return raw
+		}
+		return raw
+	}
+
+	if strings.HasPrefix(d, "'") && strings.HasSuffix(d, "'") {
+		return d
+	}
+
 	return d
 }
 

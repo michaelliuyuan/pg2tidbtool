@@ -81,6 +81,8 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 
 	rpt := reporter.NewReport("schema-migration")
 
+	var deferredFKs []string
+
 	for _, table := range schemaInfo.Tables {
 		tableStart := fmt.Sprintf("-- Table: %s", table.Name)
 		builder.statements = append(builder.statements, tableStart)
@@ -109,7 +111,7 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 
 		for _, fk := range table.ForeignKeys {
 			fkDDL := builder.BuildForeignKeyDDL(fk)
-			builder.statements = append(builder.statements, fkDDL)
+			deferredFKs = append(deferredFKs, fkDDL)
 		}
 
 		rpt.AddTableReport(reporter.TableReport{
@@ -117,6 +119,11 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 			Status:    reporter.StatusPass,
 			SourceRows: int64(len(table.Columns)),
 		})
+	}
+
+	if len(deferredFKs) > 0 {
+		builder.statements = append(builder.statements, "-- Foreign Keys (deferred)")
+		builder.statements = append(builder.statements, deferredFKs...)
 	}
 
 	for _, view := range schemaInfo.Views {
@@ -164,17 +171,29 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 	return nil
 }
 
-func (m *Migrator) executeDDL(ctx context.Context, sql string) error {
+func (m *Migrator) executeDDL(ctx context.Context, ddl string) error {
 	tidbDB, err := sql.Open("mysql", m.cfg.Target.DSN())
 	if err != nil {
 		return fmt.Errorf("connect to TiDB: %w", err)
 	}
 	defer tidbDB.Close()
 
-	statements := strings.Split(sql, ";")
+	statements := strings.Split(ddl, ";")
 	for _, stmt := range statements {
 		stmt = strings.TrimSpace(stmt)
-		if stmt == "" || strings.HasPrefix(stmt, "--") {
+		if stmt == "" {
+			continue
+		}
+		lines := strings.Split(stmt, "\n")
+		allComments := true
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "--") {
+				allComments = false
+				break
+			}
+		}
+		if allComments {
 			continue
 		}
 		if _, err := tidbDB.ExecContext(ctx, stmt); err != nil {

@@ -11,7 +11,6 @@ import (
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/config"
 	cerrors "github.com/pg2tidb/pg2tidb-migrator/internal/common/errors"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/logger"
-	"github.com/pg2tidb/pg2tidb-migrator/internal/common/reporter"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/data"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/precheck"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/schema"
@@ -40,7 +39,7 @@ func NewOrchestrator(cfg config.Config) *Orchestrator {
 }
 
 func (o *Orchestrator) Run(ctx context.Context, pipelineCfg PipelineConfig) ([]PipelineResult, error) {
-	logger.Init(o.cfg.Logging.Level, o.cfg.Logging.Format, o.cfg.Logging.Output)
+	logger.InitWithOutput(o.cfg.Logging.Level, o.cfg.Logging.Format, o.cfg.Logging.Output)
 	defer logger.Sync()
 
 	log := zap.L()

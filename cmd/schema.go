@@ -30,7 +30,7 @@ var schemaCmd = &cobra.Command{
 
 		logLevel, _ := cmd.Flags().GetString("log-level")
 		logFormat, _ := cmd.Flags().GetString("log-format")
-		logger.Init(logLevel, logFormat, cfg.Logging.Output)
+		logger.InitWithOutput(logLevel, logFormat, cfg.Logging.Output)
 		defer logger.Sync()
 
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
