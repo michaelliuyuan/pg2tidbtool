@@ -232,25 +232,56 @@ func (m *Migrator) exportTable(ctx context.Context, table string, opts common.Da
 	}
 	defer f.Close()
 
+	var totalRows int64
+
 	copyQuery := fmt.Sprintf("COPY %s.%s TO STDOUT WITH (FORMAT csv, NULL '\\N', HEADER false)",
 		quotePG(schema), quotePG(table))
 
-	var totalRows int64
-	var totalBytes int64
+	conn, err := m.pgDB.Conn(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("get connection: %w", err)
+	}
+	defer conn.Close()
 
+	err = conn.Raw(func(driverConn interface{}) error {
+		pgConn, ok := driverConn.(interface {
+			CopyTo(context.Context, string, string) (int64, error)
+		})
+		if !ok {
+			return m.exportTableFallback(ctx, schema, table, f, opts)
+		}
+		n, copyErr := pgConn.CopyTo(ctx, copyQuery, "")
+		totalRows = n
+		return copyErr
+	})
+
+	if err != nil {
+		return totalRows, 0, fmt.Errorf("copy export: %w", err)
+	}
+
+	fi, _ := f.Stat()
+	var totalBytes int64
+	if fi != nil {
+		totalBytes = fi.Size()
+	}
+
+	return totalRows, totalBytes, nil
+}
+
+func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string, f *os.File, opts common.DataOpts) error {
 	w := csv.NewWriter(f)
 	defer w.Flush()
 
 	query := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
 	rows, err := m.pgDB.QueryContext(ctx, query)
 	if err != nil {
-		return 0, 0, fmt.Errorf("query table: %w", err)
+		return fmt.Errorf("query table: %w", err)
 	}
 	defer rows.Close()
 
 	cols, err := rows.ColumnTypes()
 	if err != nil {
-		return 0, 0, err
+		return err
 	}
 	values := make([]interface{}, len(cols))
 	valuePtrs := make([]interface{}, len(cols))
@@ -258,37 +289,25 @@ func (m *Migrator) exportTable(ctx context.Context, table string, opts common.Da
 		valuePtrs[i] = &values[i]
 	}
 
+	var rowCount int64
 	for rows.Next() {
 		if err := rows.Scan(valuePtrs...); err != nil {
-			return totalRows, totalBytes, fmt.Errorf("scan row: %w", err)
+			return fmt.Errorf("scan row: %w", err)
 		}
-
 		record := make([]string, len(cols))
 		for i, val := range values {
 			record[i] = convertValue(val)
 		}
-
 		if err := w.Write(record); err != nil {
-			return totalRows, totalBytes, fmt.Errorf("write csv row: %w", err)
+			return fmt.Errorf("write csv row: %w", err)
 		}
-
-		totalRows++
-		if totalRows%int64(opts.BatchSize) == 0 {
-			m.cpMgr.UpdateTableProgress(table, totalRows, 0)
+		rowCount++
+		if rowCount%int64(opts.BatchSize) == 0 {
+			m.cpMgr.UpdateTableProgress(table, rowCount, 0)
 		}
 	}
 
-	w.Flush()
-	if err := w.Error(); err != nil {
-		return totalRows, totalBytes, err
-	}
-
-	fi, _ := f.Stat()
-	if fi != nil {
-		totalBytes = fi.Size()
-	}
-
-	return totalRows, totalBytes, nil
+	return w.Error()
 }
 
 func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts) error {

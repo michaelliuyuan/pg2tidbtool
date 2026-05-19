@@ -163,14 +163,86 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 	}
 	defer pgRows.Close()
 
-	var mismatchCount int
-	rowNum := 0
-	for pgRows.Next() {
-		rowNum++
+	pgCols, _ := pgRows.ColumnTypes()
+	if pgCols == nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = "failed to get PG column types"
+		return tr
+	}
+	pgValues := make([]interface{}, len(pgCols))
+	pgPtrs := make([]interface{}, len(pgCols))
+	for i := range pgValues {
+		pgPtrs[i] = &pgValues[i]
 	}
 
-	tr.Status = reporter.StatusPass
-	tr.Suggestion = fmt.Sprintf("sampled %d rows (%.1f%%), %d mismatches", sampleSize, ratio*100, mismatchCount)
+	var pgData [][]string
+	for pgRows.Next() {
+		if err := pgRows.Scan(pgPtrs...); err != nil {
+			tr.Status = reporter.StatusFail
+			tr.Error = fmt.Sprintf("scan PG row: %v", err)
+			return tr
+		}
+		row := make([]string, len(pgCols))
+		for i, val := range pgValues {
+			row[i] = fmt.Sprintf("%v", val)
+		}
+		pgData = append(pgData, row)
+	}
+
+	tidbQuery := fmt.Sprintf("SELECT * FROM %s ORDER BY 1 LIMIT %d OFFSET %d",
+		quoteMySQL(table), sampleSize, offset)
+	tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
+	if err != nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = fmt.Sprintf("sample target: %v", err)
+		return tr
+	}
+	defer tidbRows.Close()
+
+	tidbCols, _ := tidbRows.ColumnTypes()
+	if tidbCols == nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = "failed to get TiDB column types"
+		return tr
+	}
+	tidbValues := make([]interface{}, len(tidbCols))
+	tidbPtrs := make([]interface{}, len(tidbCols))
+	for i := range tidbValues {
+		tidbPtrs[i] = &tidbValues[i]
+	}
+
+	var mismatchCount int
+	rowIdx := 0
+	for tidbRows.Next() {
+		if err := tidbRows.Scan(tidbPtrs...); err != nil {
+			tr.Status = reporter.StatusFail
+			tr.Error = fmt.Sprintf("scan TiDB row: %v", err)
+			return tr
+		}
+
+		if rowIdx < len(pgData) {
+			for colIdx, val := range tidbValues {
+				pgVal := ""
+				if colIdx < len(pgData[rowIdx]) {
+					pgVal = pgData[rowIdx][colIdx]
+				}
+				tidbVal := fmt.Sprintf("%v", val)
+				if pgVal != tidbVal {
+					mismatchCount++
+					break
+				}
+			}
+		}
+		rowIdx++
+	}
+
+	if mismatchCount > 0 {
+		tr.Status = reporter.StatusFail
+		tr.Error = fmt.Sprintf("%d/%d rows mismatch in sampling", mismatchCount, len(pgData))
+	} else {
+		tr.Status = reporter.StatusPass
+	}
+	tr.Suggestion = fmt.Sprintf("sampled %d rows (%.1f%%), %d mismatches", len(pgData), ratio*100, mismatchCount)
 	return tr
 }
 

@@ -3,6 +3,10 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/pg2tidb/pg2tidb-migrator/internal/common"
+	"github.com/pg2tidb/pg2tidb-migrator/internal/common/config"
+	"github.com/pg2tidb/pg2tidb-migrator/internal/common/logger"
+	"github.com/pg2tidb/pg2tidb-migrator/internal/schema"
 	"github.com/spf13/cobra"
 )
 
@@ -16,8 +20,29 @@ var schemaCmd = &cobra.Command{
   - Sequences
   - Constraints`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("schema migration: not implemented yet")
-		return nil
+		cfg, err := config.Load(cfgFile)
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		if err := cfg.Validate(); err != nil {
+			return fmt.Errorf("invalid config: %w", err)
+		}
+
+		logLevel, _ := cmd.Flags().GetString("log-level")
+		logFormat, _ := cmd.Flags().GetString("log-format")
+		logger.Init(logLevel, logFormat, cfg.Logging.Output)
+		defer logger.Sync()
+
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		outputFile, _ := cmd.Flags().GetString("output")
+		excludeTables, _ := cmd.Flags().GetStringSlice("exclude-tables")
+
+		m := schema.NewMigrator(*cfg)
+		return m.Run(cmd.Context(), common.SchemaOpts{
+			DryRun:        dryRun,
+			OutputFile:    outputFile,
+			ExcludeTables: excludeTables,
+		})
 	},
 }
 

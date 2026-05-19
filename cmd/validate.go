@@ -3,6 +3,10 @@ package cmd
 import (
 	"fmt"
 
+	"github.com/pg2tidb/pg2tidb-migrator/internal/common"
+	"github.com/pg2tidb/pg2tidb-migrator/internal/common/config"
+	"github.com/pg2tidb/pg2tidb-migrator/internal/common/logger"
+	"github.com/pg2tidb/pg2tidb-migrator/internal/validator"
 	"github.com/spf13/cobra"
 )
 
@@ -14,7 +18,37 @@ var validateCmd = &cobra.Command{
   - L2: Sampling data comparison
   - L3: Full checksum verification`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("data validation: not implemented yet")
+		cfg, err := config.Load(cfgFile)
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		if err := cfg.Validate(); err != nil {
+			return fmt.Errorf("invalid config: %w", err)
+		}
+
+		logLevel, _ := cmd.Flags().GetString("log-level")
+		logFormat, _ := cmd.Flags().GetString("log-format")
+		logger.Init(logLevel, logFormat, cfg.Logging.Output)
+		defer logger.Sync()
+
+		level, _ := cmd.Flags().GetString("level")
+		sampleRatio, _ := cmd.Flags().GetFloat64("sample-ratio")
+		tables, _ := cmd.Flags().GetStringSlice("tables")
+		reportFile, _ := cmd.Flags().GetString("report")
+
+		v := validator.NewValidator(*cfg)
+		rpt, err := v.Run(cmd.Context(), common.ValidateOpts{
+			Level:       level,
+			SampleRatio: sampleRatio,
+			Tables:      tables,
+			ReportFile:  reportFile,
+		})
+		if err != nil {
+			return err
+		}
+
+		fmt.Fprintf(cmd.OutOrStderr(), "Validation completed: %s (%d pass, %d fail, %d warn)\n",
+			rpt.Status, rpt.Stats.PassTables, rpt.Stats.FailTables, rpt.Stats.WarnTables)
 		return nil
 	},
 }
