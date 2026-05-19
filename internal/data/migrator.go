@@ -3,19 +3,17 @@ package data
 import (
 	"context"
 	"database/sql"
-	"encoding/csv"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
+	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/checkpoint"
@@ -269,9 +267,6 @@ func (m *Migrator) exportTable(ctx context.Context, table string, opts common.Da
 }
 
 func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string, f *os.File, opts common.DataOpts) error {
-	w := csv.NewWriter(f)
-	defer w.Flush()
-
 	query := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
 	rows, err := m.pgDB.QueryContext(ctx, query)
 	if err != nil {
@@ -298,8 +293,9 @@ func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string
 		for i, val := range values {
 			record[i] = convertValue(val)
 		}
-		if err := w.Write(record); err != nil {
-			return fmt.Errorf("write csv row: %w", err)
+		line := strings.Join(record, "\t") + "\n"
+		if _, err := f.WriteString(line); err != nil {
+			return fmt.Errorf("write row: %w", err)
 		}
 		rowCount++
 		if rowCount%int64(opts.BatchSize) == 0 {
@@ -307,7 +303,7 @@ func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string
 		}
 	}
 
-	return w.Error()
+	return nil
 }
 
 func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts) error {
@@ -347,18 +343,13 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 }
 
 func (m *Migrator) loadCSVToTiDB(ctx context.Context, db *sql.DB, table, csvPath string) error {
-	f, err := os.Open(csvPath)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+	mysql.RegisterLocalFile(csvPath)
+	defer mysql.DeregisterLocalFile(csvPath)
 
-	reader := csv.NewReader(f)
+	query := fmt.Sprintf("LOAD DATA LOCAL INFILE ? INTO TABLE %s FIELDS TERMINATED BY '\\t' LINES TERMINATED BY '\\n'",
+		quoteMySQL(table))
 
-	query := fmt.Sprintf("LOAD DATA LOCAL INFILE '%s' INTO TABLE %s FIELDS TERMINATED BY ',' ENCLOSED BY '\"' LINES TERMINATED BY '\\n'",
-		csvPath, quoteMySQL(table))
-
-	_, err = db.ExecContext(ctx, query)
+	_, err := db.ExecContext(ctx, query, csvPath)
 	return err
 }
 
