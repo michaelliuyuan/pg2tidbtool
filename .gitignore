@@ -1,0 +1,32 @@
+# Binaries
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test
+*.test
+*.out
+coverage.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Runtime
+.checkpoint/
+/tmp/
+*.csv
+*.log
+unsupported-objects.log
+precheck-report.json
+validation-report.json
