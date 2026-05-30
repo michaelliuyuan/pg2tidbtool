@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, type FormRules } from 'element-plus'
 import apiClient from '../api'
+import type { ElTable } from 'element-plus'
 
 const router = useRouter()
 const loading = ref(false)
@@ -12,7 +13,7 @@ const availableTables = ref<{name: string; row_estimate: number}[]>([])
 const loadingTables = ref(false)
 const tableSearch = ref('')
 const selectedTables = ref<string[]>([])
-const selectAllTables = ref(false)
+const tableRef = ref<InstanceType<typeof ElTable> | null>(null)
 
 const form = reactive({
   name: '',
@@ -178,7 +179,6 @@ async function loadTables() {
       sslmode: form.source.sslmode,
     })
     availableTables.value = data.tables || []
-    selectAllTables.value = false
   } catch (e: any) {
     ElMessage.error(`加载表列表失败: ${e.response?.data?.error || e.message}`)
   } finally {
@@ -192,11 +192,18 @@ const filteredTables = computed(() => {
   return availableTables.value.filter(t => t.name.toLowerCase().includes(kw))
 })
 
+function handleTableSelection(rows: { name: string; row_estimate: number }[]) {
+  selectedTables.value = rows.map(r => r.name)
+}
+
 function toggleSelectAll() {
-  if (selectAllTables.value) {
-    selectedTables.value = availableTables.value.map(t => t.name)
+  if (!tableRef.value) return
+  if (selectedTables.value.length === filteredTables.value.length && filteredTables.value.length > 0) {
+    tableRef.value.clearSelection()
   } else {
-    selectedTables.value = []
+    filteredTables.value.forEach(row => {
+      tableRef.value!.toggleRowSelection(row, true)
+    })
   }
 }
 
@@ -355,7 +362,9 @@ function prevStep() {
               <template #prefix><el-icon><Search /></el-icon></template>
             </el-input>
             <el-space>
-              <el-checkbox v-model="selectAllTables" @change="toggleSelectAll">全选</el-checkbox>
+              <el-button size="small" @click="toggleSelectAll">
+                {{ selectedTables.length === filteredTables.length && filteredTables.length > 0 ? '取消全选' : '全选' }}
+              </el-button>
               <span style="color: #909399; font-size: 13px;">已选 {{ selectedTables.length }} / {{ availableTables.length }} 张表</span>
             </el-space>
           </div>
@@ -363,29 +372,27 @@ function prevStep() {
           <div v-else-if="availableTables.length === 0" style="color: #909399; text-align: center; padding: 40px;">
             暂无表数据，请确认源数据库连接配置
           </div>
-          <el-checkbox-group v-else v-model="selectedTables">
-            <div style="max-height: 400px; overflow-y: auto;">
-              <table style="width: 100%; border-collapse: collapse;">
-                <thead>
-                  <tr style="background: #f5f7fa; position: sticky; top: 0;">
-                    <th style="padding: 8px; text-align: left; width: 40px;"></th>
-                    <th style="padding: 8px; text-align: left;">表名</th>
-                    <th style="padding: 8px; text-align: right;">预估行数</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="table in filteredTables" :key="table.name" style="border-bottom: 1px solid #ebeef5;">
-                    <td style="padding: 6px 8px;"><el-checkbox :value="table.name" /></td>
-                    <td style="padding: 6px 8px;">{{ table.name }}</td>
-                    <td style="padding: 6px 8px; text-align: right; color: #909399;">{{ table.row_estimate >= 0 ? table.row_estimate.toLocaleString() : '-' }}</td>
-                  </tr>
-                </tbody>
-              </table>
+          <template v-else>
+            <el-table
+              ref="tableRef"
+              :data="filteredTables"
+              @selection-change="handleTableSelection"
+              style="width: 100%;"
+              max-height="460"
+              :row-key="(row: any) => row.name"
+            >
+              <el-table-column type="selection" width="55" :reserve-selection="true" />
+              <el-table-column prop="name" label="表名" />
+              <el-table-column label="预估行数" width="180" align="right">
+                <template #default="{ row }: { row: { row_estimate: number } }">
+                  <span style="color: #909399;">{{ row.row_estimate >= 0 ? row.row_estimate.toLocaleString() : '-' }}</span>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div v-if="selectedTables.length === 0 && availableTables.length > 0" style="margin-top: 8px;">
+              <el-alert type="info" :closable="false" title="未选择任何表，将迁移所有表" />
             </div>
-          </el-checkbox-group>
-          <div v-if="selectedTables.length === 0 && availableTables.length > 0" style="margin-top: 8px;">
-            <el-alert type="info" :closable="false" title="未选择任何表，将迁移所有表" />
-          </div>
+          </template>
         </div>
 
         <!-- Step 3: Options -->
