@@ -170,6 +170,7 @@ func (m *Manager) GetPhase() string {
 func (m *Manager) SetPhase(phase string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	_ = m.load()
 	m.data.Phase = phase
 	return m.save()
 }
