@@ -231,7 +231,6 @@ func (m *Migrator) exportTable(ctx context.Context, table string, opts common.Da
 	defer f.Close()
 
 	var totalRows int64
-
 	copyQuery := fmt.Sprintf("COPY %s.%s TO STDOUT WITH (FORMAT csv, NULL '\\N', HEADER false)",
 		quotePG(schema), quotePG(table))
 
@@ -241,20 +240,22 @@ func (m *Migrator) exportTable(ctx context.Context, table string, opts common.Da
 	}
 	defer conn.Close()
 
-	err = conn.Raw(func(driverConn interface{}) error {
-		pgConn, ok := driverConn.(interface {
-			CopyTo(context.Context, string, string) (int64, error)
+	exportErr := m.exportTableFallback(ctx, schema, table, f, opts, &totalRows)
+	if exportErr != nil {
+		err = conn.Raw(func(driverConn interface{}) error {
+			pgConn, ok := driverConn.(interface {
+				CopyTo(context.Context, string, string) (int64, error)
+			})
+			if !ok {
+				return exportErr
+			}
+			n, copyErr := pgConn.CopyTo(ctx, copyQuery, "")
+			totalRows = n
+			return copyErr
 		})
-		if !ok {
-			return m.exportTableFallback(ctx, schema, table, f, opts)
+		if err != nil {
+			return totalRows, 0, fmt.Errorf("copy export: %w", err)
 		}
-		n, copyErr := pgConn.CopyTo(ctx, copyQuery, "")
-		totalRows = n
-		return copyErr
-	})
-
-	if err != nil {
-		return totalRows, 0, fmt.Errorf("copy export: %w", err)
 	}
 
 	fi, _ := f.Stat()
@@ -266,7 +267,7 @@ func (m *Migrator) exportTable(ctx context.Context, table string, opts common.Da
 	return totalRows, totalBytes, nil
 }
 
-func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string, f *os.File, opts common.DataOpts) error {
+func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string, f *os.File, opts common.DataOpts, totalRows *int64) error {
 	query := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
 	rows, err := m.pgDB.QueryContext(ctx, query)
 	if err != nil {
@@ -299,10 +300,12 @@ func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string
 		}
 		rowCount++
 		if rowCount%int64(opts.BatchSize) == 0 {
+			*totalRows = rowCount
 			m.cpMgr.UpdateTableProgress(table, rowCount, 0)
 		}
 	}
 
+	*totalRows = rowCount
 	return nil
 }
 

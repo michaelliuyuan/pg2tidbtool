@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/go-sql-driver/mysql"
@@ -184,7 +185,7 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 		}
 		row := make([]string, len(pgCols))
 		for i, val := range pgValues {
-			row[i] = fmt.Sprintf("%v", val)
+			row[i] = normalizeValue(val)
 		}
 		pgData = append(pgData, row)
 	}
@@ -226,7 +227,7 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 				if colIdx < len(pgData[rowIdx]) {
 					pgVal = pgData[rowIdx][colIdx]
 				}
-				tidbVal := fmt.Sprintf("%v", val)
+				tidbVal := normalizeValue(val)
 				if pgVal != tidbVal {
 					mismatchCount++
 					break
@@ -324,4 +325,25 @@ func quotePG(name string) string {
 
 func quoteMySQL(name string) string {
 	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
+}
+
+func normalizeValue(val interface{}) string {
+	if val == nil {
+		return "\\N"
+	}
+	switch v := val.(type) {
+	case bool:
+		if v {
+			return "1"
+		}
+		return "0"
+	case []byte:
+		return string(v)
+	case time.Time:
+		return v.Format("2006-01-02 15:04:05.999999")
+	case fmt.Stringer:
+		return v.String()
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }

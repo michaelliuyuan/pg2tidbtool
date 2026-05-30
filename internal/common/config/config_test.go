@@ -108,7 +108,7 @@ func TestTargetDSN(t *testing.T) {
 		Password: "",
 		Database: "testdb",
 	}
-	expected := ":@tcp(127.0.0.1:4000)/testdb?charset=utf8mb4&parseTime=true"
+	expected := "root:@tcp(127.0.0.1:4000)/testdb?charset=utf8mb4&parseTime=true"
 	if dsn := cfg.DSN(); dsn != expected {
 		t.Errorf("expected %s, got %s", expected, dsn)
 	}

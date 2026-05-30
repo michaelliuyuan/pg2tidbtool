@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
-	"syscall"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -147,14 +146,15 @@ func (c *Checker) checkDiskSpace(ctx context.Context) CheckItem {
 		tempDir = "/tmp/pg2tidb"
 	}
 
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(tempDir, &stat); err != nil {
+	var availGB float64
+	if stat, err := getDiskUsage(tempDir); err != nil {
 		item.Status = reporter.StatusWarn
 		item.Message = fmt.Sprintf("cannot check disk space for %s: %v", tempDir, err)
 		return item
+	} else {
+		availGB = stat
 	}
 
-	availGB := float64(stat.Bavail*uint64(stat.Bsize)) / 1024 / 1024 / 1024
 	if availGB < 1.0 {
 		item.Status = reporter.StatusFail
 		item.Message = fmt.Sprintf("insufficient disk space: %.1f GB available in %s", availGB, tempDir)

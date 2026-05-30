@@ -220,6 +220,83 @@ pg2tidbtool/
 └── Dockerfile              # Docker 构建
 ```
 
+## 测试验证
+
+### 测试环境
+
+| 项目 | 配置 |
+|------|------|
+| 构建平台 | Windows/amd64, Go 1.26.3 |
+| PostgreSQL | 16.13, pepezzzz.synology.me:23654 |
+| TiDB | v7.1.9-0.0, pepezzzz.synology.me:23140 |
+| 测试数据库 | mydb (20 张表 + 1 视图) |
+
+### Pre-check 结果
+
+```
+5 PASS, 3 WARN, 0 FAIL
+- pg-connection: PASS (PostgreSQL 16.13)
+- tidb-connection: PASS (TiDB v7.1.9)
+- disk-space: PASS
+- pg-schema-permission: PASS
+- collation: PASS (UTF)
+- WARN: 1 trigger (trg_update_ts)
+- WARN: 1 stored function (update_timestamp)
+- WARN: 1 enum type (mood)
+```
+
+### Schema 迁移结果
+
+```
+20 tables + 1 view 迁移成功
+- 19 张表含主键，1 张无主键表 (no_pk_table)
+- 3 个索引 (unique, normal, composite)
+- 1 个外键 (fk_child → fk_parent)
+- 1 个视图 (v_summary)
+- 2 个不支持对象: trigger trg_update_ts, function update_timestamp
+```
+
+### Data 迁移结果
+
+| 表名 | PG 行数 | TiDB 行数 | 状态 |
+|------|---------|----------|------|
+| array_types | 4 | 4 | PASS |
+| basic_types | 3 | 3 | PASS |
+| composite_pk | 3 | 3 | PASS |
+| constraint_test | 3 | 3 | PASS |
+| custom_type_test | 0 | 0 | PASS |
+| empty_table | 0 | 0 | PASS |
+| enum_test | 3 | 3 | PASS |
+| fk_child | 3 | 3 | PASS |
+| fk_parent | 2 | 2 | PASS |
+| index_test | 4 | 4 | PASS |
+| large_json | 4 | 4 | PASS |
+| large_table | 5,100,000 | 595,580 | FAIL (导出中断) |
+| no_pk_table | 4 | 4 | PASS |
+| null_test | 3 | 3 | PASS |
+| order | 3 | 3 | PASS |
+| seq_test | 3 | 3 | PASS |
+| single_pk | 3 | 3 | PASS |
+| single_row | 1 | 1 | PASS |
+| special_chars | 3 | 3 | PASS |
+| trigger_test | 1 | 1 | PASS |
+
+L1 行数校验: **19/20 PASS**, 1 FAIL (large_table 导出超时导致不完整)
+
+### 发现的 Bug 及修复
+
+1. **Windows 编译失败** — `precheck/checker.go` 使用 `syscall.Statfs_t` (Linux only)，已添加平台特定文件 `disk_windows.go` / `disk_posix.go`
+2. **TestTargetDSN 断言错误** — `config_test.go` expected 值缺少 user 前缀
+3. **ENUM 注释分号问题** — `ddl.go` BuildEnumDDL 中注释含分号导致 SQL 分割错误，执行 DDL 时触发语法错误
+4. **L2 采样校验误报** — `validator.go` 使用 `fmt.Sprintf("%v")` 比较 PG/TiDB 数据，类型差异导致误判 (如 boolean true vs 1)
+
+### 已知限制
+
+- Trigger 和 Stored Function 不会自动迁移，仅在 precheck 阶段告警
+- ENUM 类型转为 TEXT，未使用 MySQL ENUM 语法
+- L2 校验的值比较需要更精确的类型感知比较逻辑
+- 大表 (5M+ rows) 导出时 progress bar 未正确更新
+
 ## 开发
 
 ```bash

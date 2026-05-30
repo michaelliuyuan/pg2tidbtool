@@ -166,7 +166,7 @@ func (b *DDLBuilder) BuildEnumDDL(enum EnumType) string {
 	for i, v := range enum.Values {
 		values[i] = fmt.Sprintf("'%s'", escapeSQLString(v))
 	}
-	return fmt.Sprintf("-- ENUM %s: TiDB does not support CREATE TYPE AS ENUM; using VARCHAR or explicit ENUM\n-- Values: %s",
+	return fmt.Sprintf("-- ENUM %s: TiDB does not support CREATE TYPE AS ENUM, using VARCHAR or explicit ENUM\n-- Values: %s",
 		enum.Name, strings.Join(values, ", "))
 }
 
