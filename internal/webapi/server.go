@@ -104,6 +104,7 @@ func NewServer(store *store.Store, host string, port int, dataDir string, static
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", s.handleHealth)
 		r.Post("/config/test-connection", s.handleTestConnection)
+		r.Post("/config/list-tables", s.handleListTables)
 		r.Post("/tasks", s.handleCreateTask)
 		r.Get("/tasks", s.handleListTasks)
 		r.Route("/tasks/{taskID}", func(r chi.Router) {
@@ -306,6 +307,73 @@ func (s *Server) testTiDBConnection(ctx context.Context, req *TestConnectionRequ
 	result["ok"] = true
 	result["version"] = version
 	return result
+}
+
+func (s *Server) handleListTables(w http.ResponseWriter, r *http.Request) {
+	var req TestConnectionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Type != "source" {
+		s.writeError(w, http.StatusBadRequest, "type must be 'source'")
+		return
+	}
+
+	cfg := config.SourceConfig{
+		Host:     req.Host,
+		Port:     req.Port,
+		User:     req.User,
+		Password: req.Password,
+		Database: req.Database,
+		Schema:   req.Schema,
+		SSLMode:  req.SSLMode,
+	}
+	if cfg.Schema == "" {
+		cfg.Schema = "public"
+	}
+	if cfg.SSLMode == "" {
+		cfg.SSLMode = "disable"
+	}
+
+	pgConn, err := openPGTestConn(cfg.DSN())
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "connect failed: "+err.Error())
+		return
+	}
+	defer pgConn.Close()
+
+	rows, err := pgConn.QueryContext(r.Context(), `
+		SELECT table_name,
+		       (SELECT reltuples::bigint FROM pg_class WHERE oid = (quote_ident($1)||'.'||quote_ident(t.table_name))::regclass) AS row_estimate
+		FROM information_schema.tables t
+		WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+		ORDER BY table_name`, cfg.Schema)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "query tables: "+err.Error())
+		return
+	}
+	defer rows.Close()
+
+	type TableInfo struct {
+		Name       string `json:"name"`
+		RowEstimate int64  `json:"row_estimate"`
+	}
+	var tables []TableInfo
+	for rows.Next() {
+		var ti TableInfo
+		if err := rows.Scan(&ti.Name, &ti.RowEstimate); err != nil {
+			continue
+		}
+		tables = append(tables, ti)
+	}
+	if tables == nil {
+		tables = []TableInfo{}
+	}
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"tables": tables,
+		"count":  len(tables),
+	})
 }
 
 type CreateTaskRequest struct {

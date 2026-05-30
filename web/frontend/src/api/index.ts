@@ -122,6 +122,9 @@ export const apiClient = {
   testConnection: (req: ConnectionTestRequest) =>
     api.post<ConnectionTestResult>('/config/test-connection', req),
 
+  listTables: (req: ConnectionTestRequest) =>
+    api.post<{ tables: { name: string; row_estimate: number }[]; count: number }>('/config/list-tables', { ...req, type: 'source' }),
+
   createTask: (req: CreateTaskRequest) =>
     api.post<Task>('/tasks', req),
 
