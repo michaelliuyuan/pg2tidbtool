@@ -27,7 +27,7 @@ type Task struct {
 	ID          string     `json:"id"`
 	Name        string     `json:"name"`
 	Status      TaskStatus `json:"status"`
-	ConfigJSON  string     `json:"config_json"`
+	ConfigJSON  string     `json:"-"` // hidden from API, contains passwords
 	Phase       string     `json:"phase"`
 	Progress    float64    `json:"progress"`
 	TablesTotal int        `json:"tables_total"`

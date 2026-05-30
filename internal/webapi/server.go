@@ -149,9 +149,9 @@ func (s *Server) Start() error {
 	server := &http.Server{
 		Addr:         s.addr,
 		Handler:      s.router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 120 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 	return server.ListenAndServe()
 }
