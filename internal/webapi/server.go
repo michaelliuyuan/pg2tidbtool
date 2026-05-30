@@ -324,6 +324,7 @@ type MigrationOptsBody struct {
 	SkipSchema    bool     `json:"skip_schema"`
 	SkipData      bool     `json:"skip_data"`
 	SkipValidate  bool     `json:"skip_validate"`
+	TargetPolicy  string   `json:"target_policy"`
 }
 
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
@@ -358,6 +359,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 			TempDir:       "/tmp/pg2tidb",
 			CheckpointDir: fmt.Sprintf(".checkpoint/%s", task.ID),
 			OnError:       "abort",
+			TargetPolicy:  req.Opts.TargetPolicy,
 		},
 		Logging: config.LoggingConfig{Level: "info", Format: "console"},
 	}

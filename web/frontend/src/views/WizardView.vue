@@ -36,6 +36,7 @@ const form = reactive({
     skip_schema: false,
     skip_data: false,
     skip_validate: false,
+    target_policy: 'insert',
   },
 })
 
@@ -174,6 +175,7 @@ async function submit() {
         skip_schema: form.opts.skip_schema,
         skip_data: form.opts.skip_data,
         skip_validate: form.opts.skip_validate,
+        target_policy: form.opts.target_policy,
       },
     })
     ElMessage.success('迁移任务创建成功')
@@ -307,6 +309,17 @@ function prevStep() {
           <el-form-item label="使用 Lightning">
             <el-switch v-model="form.opts.use_lightning" />
           </el-form-item>
+          <el-divider>目标数据处理策略</el-divider>
+          <el-form-item label="数据冲突策略">
+            <el-radio-group v-model="form.opts.target_policy">
+              <el-radio value="insert">直接插入（INSERT）</el-radio>
+              <el-radio value="truncate">先清空表（TRUNCATE）</el-radio>
+              <el-radio value="drop">先删除表（DROP）</el-radio>
+            </el-radio-group>
+            <div style="color: #909399; font-size: 12px; margin-top: 4px;">
+              重复迁移时如何处理目标库已有数据。选择"先清空表"会删除表内数据但保留结构，"先删除表"会完全重建表。
+            </div>
+          </el-form-item>
           <el-divider>跳过阶段（高级）</el-divider>
           <el-form-item label="跳过预检">
             <el-switch v-model="form.opts.skip_precheck" />
@@ -331,6 +344,9 @@ function prevStep() {
             <el-descriptions-item label="目标数据库">{{ form.target.host }}:{{ form.target.port }}/{{ form.target.database }}</el-descriptions-item>
             <el-descriptions-item label="使用 Lightning">{{ form.opts.use_lightning ? '是' : '否' }}</el-descriptions-item>
             <el-descriptions-item label="批次大小">{{ form.opts.batch_size }}</el-descriptions-item>
+            <el-descriptions-item label="数据冲突策略">
+              {{ form.opts.target_policy === 'truncate' ? '先清空表' : form.opts.target_policy === 'drop' ? '先删除表' : '直接插入' }}
+            </el-descriptions-item>
           </el-descriptions>
           <el-alert
             title="点击「开始迁移」将创建任务并立即开始执行迁移"

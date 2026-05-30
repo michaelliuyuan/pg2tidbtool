@@ -51,16 +51,17 @@ func (t TargetConfig) DSN() string {
 }
 
 type MigrationConfig struct {
-	Parallel      int      `yaml:"parallel"`
-	BatchSize     int      `yaml:"batch_size"`
-	TempDir       string   `yaml:"temp_dir"`
-	Tables        []string `yaml:"tables"`
-	ExcludeTables []string `yaml:"exclude_tables"`
-	UseLightning  bool     `yaml:"use_lightning"`
-	OnError       string   `yaml:"on_error"`
-	CheckpointDir string   `yaml:"checkpoint_dir"`
-	ReadTimeout   string   `yaml:"read_timeout"`
-	WriteTimeout  string   `yaml:"write_timeout"`
+	Parallel       int      `yaml:"parallel"`
+	BatchSize      int      `yaml:"batch_size"`
+	TempDir        string   `yaml:"temp_dir"`
+	Tables         []string `yaml:"tables"`
+	ExcludeTables  []string `yaml:"exclude_tables"`
+	UseLightning   bool     `yaml:"use_lightning"`
+	OnError        string   `yaml:"on_error"`
+	CheckpointDir  string   `yaml:"checkpoint_dir"`
+	ReadTimeout    string   `yaml:"read_timeout"`
+	WriteTimeout   string   `yaml:"write_timeout"`
+	TargetPolicy   string   `yaml:"target_policy"` // insert, truncate, drop
 }
 
 func (m MigrationConfig) ReadTimeoutDuration() time.Duration {

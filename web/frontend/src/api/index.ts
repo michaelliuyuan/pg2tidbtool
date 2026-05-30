@@ -111,6 +111,7 @@ export interface CreateTaskRequest {
     skip_schema: boolean
     skip_data: boolean
     skip_validate: boolean
+    target_policy: string
   }
 }
 
