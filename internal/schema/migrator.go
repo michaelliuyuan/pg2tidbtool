@@ -81,9 +81,32 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 
 	rpt := reporter.NewReport("schema-migration")
 
+	checker := NewTargetChecker(m.cfg)
+
+	if !opts.DryRun && opts.OutputFile == "" {
+		if err := checker.LoadExistingTables(ctx); err != nil {
+			logger.Warn("failed to check existing tables, proceeding without skip", zap.Error(err))
+		}
+		if len(checker.ExistingTables()) > 0 {
+			logger.Info("found existing tables in target", zap.Int("count", len(checker.ExistingTables())))
+		}
+	}
+
 	var deferredFKs []string
 
 	for _, table := range schemaInfo.Tables {
+		if checker.TableExists(table.Name) {
+			logger.Info("table already exists in target, skipping", zap.String("table", table.Name))
+			builder.statements = append(builder.statements,
+				fmt.Sprintf("-- Table: %s (SKIPPED: already exists in target)", table.Name))
+			rpt.AddTableReport(reporter.TableReport{
+				TableName:  table.Name,
+				Status:     reporter.StatusSkip,
+				SourceRows: int64(len(table.Columns)),
+			})
+			continue
+		}
+
 		tableStart := fmt.Sprintf("-- Table: %s", table.Name)
 		builder.statements = append(builder.statements, tableStart)
 
@@ -127,6 +150,9 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 	}
 
 	for _, view := range schemaInfo.Views {
+		if checker.TableExists(view.Name) {
+			logger.Info("view already exists in target, will use CREATE OR REPLACE", zap.String("view", view.Name))
+		}
 		viewDDL := builder.BuildViewDDL(view)
 		builder.statements = append(builder.statements, viewDDL)
 	}
