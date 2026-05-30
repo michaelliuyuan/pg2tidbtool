@@ -592,7 +592,11 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 
 	tidbDB.SetConnMaxLifetime(5 * time.Minute)
 	tidbDB.SetConnMaxIdleTime(2 * time.Minute)
-	tidbDB.SetMaxOpenConns(2)
+	parallel := opts.Parallel
+	if parallel <= 0 {
+		parallel = 4
+	}
+	tidbDB.SetMaxOpenConns(parallel + 1)
 
 	if err := tidbDB.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping TiDB: %w", err)
@@ -614,98 +618,136 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 		batchSize = 5000
 	}
 
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+	var firstErr error
+	var errMu sync.Mutex
+
 	for _, table := range tables {
-		logger.Info("streaming table to TiDB", zap.String("table", table))
-
-		// Get row count for progress
-		rowCount, _ := m.getRowCount(ctx, table)
-		if rowCount > 0 {
-			logger.Info("table row count", zap.String("table", table), zap.Int64("rows", rowCount))
-		}
-
-		m.cpMgr.GetOrCreateTable(table, rowCount)
+		m.cpMgr.GetOrCreateTable(table, 0)
 		m.cpMgr.MarkTableRunning(table)
 
-		selectQuery := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
-		rows, err := m.pgDB.QueryContext(ctx, selectQuery)
-		if err != nil {
-			if m.cfg.Migration.OnError != "skip" {
-				return fmt.Errorf("query %s: %w", table, err)
+		sem <- struct{}{}
+		wg.Add(1)
+
+		go func(tableName string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if err := m.streamTable(ctx, tidbDB, schema, tableName, batchSize); err != nil {
+				m.cpMgr.MarkTableFailed(tableName, err.Error())
+				if m.cfg.Migration.OnError != "skip" {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("stream table %s: %w", tableName, err)
+					}
+					errMu.Unlock()
+					return
+				}
+				logger.Warn("table stream error", zap.String("table", tableName), zap.Error(err))
+				return
 			}
-			logger.Warn("failed to query table", zap.String("table", table), zap.Error(err))
+		}(table)
+	}
+
+	wg.Wait()
+
+	if firstErr != nil {
+		return firstErr
+	}
+
+	return nil
+}
+
+func (m *Migrator) streamTable(ctx context.Context, tidbDB *sql.DB, schema, table string, batchSize int) error {
+	logger := zap.L()
+	logger.Info("streaming table to TiDB", zap.String("table", table))
+
+	rowCount, _ := m.getRowCount(ctx, table)
+	if rowCount > 0 {
+		logger.Info("table row count", zap.String("table", table), zap.Int64("rows", rowCount))
+		m.cpMgr.UpdateTableProgress(table, 0, rowCount)
+	}
+
+	// Use a separate PG connection for this table
+	pgConn, err := m.pgDB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("get pg connection: %w", err)
+	}
+	defer pgConn.Close()
+
+	selectQuery := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
+	rows, err := pgConn.QueryContext(ctx, selectQuery)
+	if err != nil {
+		return fmt.Errorf("query %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	cols, err := rows.ColumnTypes()
+	if err != nil {
+		return fmt.Errorf("get columns for %s: %w", table, err)
+	}
+
+	colNames := make([]string, len(cols))
+	for i, col := range cols {
+		colNames[i] = quoteMySQL(col.Name())
+	}
+	colList := strings.Join(colNames, ", ")
+	placeholders := strings.Repeat("?,", len(cols))
+	placeholders = placeholders[:len(placeholders)-1]
+
+	insertBase := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		quoteMySQL(table), colList, placeholders)
+
+	var batch [][]interface{}
+	totalRows := 0
+
+	for rows.Next() {
+		values := make([]interface{}, len(cols))
+		valuePtrs := make([]interface{}, len(cols))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+		if err := rows.Scan(valuePtrs...); err != nil {
+			logger.Warn("scan error", zap.String("table", table), zap.Error(err))
 			continue
 		}
 
-		cols, err := rows.ColumnTypes()
-		if err != nil {
-			rows.Close()
-			return fmt.Errorf("get columns for %s: %w", table, err)
+		converted := make([]interface{}, len(cols))
+		for i, v := range values {
+			converted[i] = convertSQLValue(v)
 		}
+		batch = append(batch, converted)
 
-		colNames := make([]string, len(cols))
-		for i, col := range cols {
-			colNames[i] = quoteMySQL(col.Name())
-		}
-		colList := strings.Join(colNames, ", ")
-		placeholders := strings.Repeat("?,", len(cols))
-		placeholders = placeholders[:len(placeholders)-1]
-
-		insertBase := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-			quoteMySQL(table), colList, placeholders)
-
-		var batch [][]interface{}
-		totalRows := 0
-
-		for rows.Next() {
-			values := make([]interface{}, len(cols))
-			valuePtrs := make([]interface{}, len(cols))
-			for i := range values {
-				valuePtrs[i] = &values[i]
-			}
-			if err := rows.Scan(valuePtrs...); err != nil {
-				logger.Warn("scan error", zap.String("table", table), zap.Error(err))
-				continue
-			}
-
-			converted := make([]interface{}, len(cols))
-			for i, v := range values {
-				converted[i] = convertSQLValue(v)
-			}
-			batch = append(batch, converted)
-
-			if len(batch) >= batchSize {
-				if err := m.execBatch(ctx, tidbDB, insertBase, batch, len(cols)); err != nil {
-					rows.Close()
-					if m.cfg.Migration.OnError != "skip" {
-						return fmt.Errorf("insert batch for %s: %w", table, err)
-					}
-					logger.Warn("batch insert error", zap.String("table", table), zap.Error(err))
-					batch = batch[:0]
-					continue
-				}
-				totalRows += len(batch)
-				m.cpMgr.UpdateTableProgress(table, int64(totalRows), 0)
-				logger.Info("batch inserted", zap.String("table", table), zap.Int("rows_in_batch", totalRows), zap.Int64("total", rowCount))
-				batch = batch[:0]
-			}
-		}
-		rows.Close()
-
-		if len(batch) > 0 {
+		if len(batch) >= batchSize {
 			if err := m.execBatch(ctx, tidbDB, insertBase, batch, len(cols)); err != nil {
 				if m.cfg.Migration.OnError != "skip" {
-					return fmt.Errorf("insert final batch for %s: %w", table, err)
+					return fmt.Errorf("insert batch for %s: %w", table, err)
 				}
-				logger.Warn("final batch error", zap.String("table", table), zap.Error(err))
-			} else {
-				totalRows += len(batch)
+				logger.Warn("batch insert error", zap.String("table", table), zap.Error(err))
+				batch = batch[:0]
+				continue
 			}
+			totalRows += len(batch)
+			m.cpMgr.UpdateTableProgress(table, int64(totalRows), 0)
+			logger.Info("batch inserted", zap.String("table", table), zap.Int("rows_in_batch", totalRows), zap.Int64("total", rowCount))
+			batch = batch[:0]
 		}
-
-		m.cpMgr.MarkTableCompleted(table, int64(totalRows))
-		logger.Info("table import completed", zap.String("table", table), zap.Int("rows", totalRows))
 	}
 
+	if len(batch) > 0 {
+		if err := m.execBatch(ctx, tidbDB, insertBase, batch, len(cols)); err != nil {
+			if m.cfg.Migration.OnError != "skip" {
+				return fmt.Errorf("insert final batch for %s: %w", table, err)
+			}
+			logger.Warn("final batch error", zap.String("table", table), zap.Error(err))
+		} else {
+			totalRows += len(batch)
+		}
+	}
+
+	m.cpMgr.MarkTableCompleted(table, int64(totalRows))
+	logger.Info("table import completed", zap.String("table", table), zap.Int("rows", totalRows))
 	return nil
 }
 
