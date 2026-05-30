@@ -115,11 +115,34 @@ export interface CreateTaskRequest {
   }
 }
 
+export interface ListTablesRequest {
+  host: string
+  port: number
+  user: string
+  password: string
+  database: string
+  schema: string
+  sslmode: string
+}
+
+export interface ListTablesResult {
+  name: string
+  row_estimate: number
+}
+
+export interface ListTablesResponse {
+  count: number
+  tables: ListTablesResult[]
+}
+
 export const apiClient = {
   health: () => api.get('/health'),
 
   testConnection: (req: ConnectionTestRequest) =>
     api.post<ConnectionTestResult>('/config/test-connection', req),
+
+  listTables: (req: ListTablesRequest) =>
+    api.post<ListTablesResponse>('/config/list-tables', req),
 
   createTask: (req: CreateTaskRequest) =>
     api.post<Task>('/tasks', req),
