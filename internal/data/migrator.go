@@ -61,9 +61,6 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 	}
 
 	cpDir := m.cfg.Migration.CheckpointDir
-	if opts.TempDir != "" {
-		cpDir = filepath.Join(opts.TempDir, ".checkpoint")
-	}
 	m.cpMgr, err = checkpoint.NewManager(cpDir)
 	if err != nil {
 		return nil, cerrors.Wrap(cerrors.ErrCheckpointLoad, "init checkpoint", err)
@@ -81,93 +78,93 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 
 	logger.Info("migrating tables", zap.Int("count", len(tables)))
 
-	m.display = progress.NewDisplay()
-	m.display.Start()
-
-	var totalRows atomic.Int64
-	var totalBytes atomic.Int64
-
-	sem := make(chan struct{}, opts.Parallel)
-	var wg sync.WaitGroup
-	var firstErr error
-	var errMu sync.Mutex
-
-	for _, table := range tables {
-		if m.cpMgr.IsTableCompleted(table) {
-			logger.Info("skipping completed table", zap.String("table", table))
-			continue
+	if !opts.UseLightning {
+		// Streaming INSERT path: skip CSV export, import directly via SQL
+		if err := m.importViaSQL(ctx, opts); err != nil {
+			return nil, cerrors.Wrap(cerrors.ErrDataImport, "sql import", err)
 		}
+	} else {
+		// CSV export + LOAD DATA path
+		m.display = progress.NewDisplay()
+		m.display.Start()
 
-		rowCount, err := m.getRowCount(ctx, table)
-		if err != nil {
-			logger.Warn("failed to get row count", zap.String("table", table), zap.Error(err))
-			rowCount = 0
-		}
+		var totalRows atomic.Int64
+		var totalBytes atomic.Int64
 
-		m.cpMgr.GetOrCreateTable(table, rowCount)
-		bar := m.display.AddBar(table, rowCount)
+		sem := make(chan struct{}, opts.Parallel)
+		var wg sync.WaitGroup
+		var firstErr error
+		var errMu sync.Mutex
 
-		sem <- struct{}{}
-		wg.Add(1)
-
-		go func(tableName string, bar *progress.Bar) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			m.cpMgr.MarkTableRunning(tableName)
-
-			rows, bytes, err := m.exportTable(ctx, tableName, opts)
-			if err != nil {
-				m.cpMgr.MarkTableFailed(tableName, err.Error())
-				m.display.RemoveBar(tableName)
-				errMu.Lock()
-				if firstErr == nil {
-					firstErr = cerrors.WithTable(
-						cerrors.Wrap(cerrors.ErrDataExport, "export table", err),
-						tableName)
-				}
-				errMu.Unlock()
-				return
+		for _, table := range tables {
+			if m.cpMgr.IsTableCompleted(table) {
+				logger.Info("skipping completed table", zap.String("table", table))
+				continue
 			}
 
-			bar.Set(rows)
-			totalRows.Add(rows)
-			totalBytes.Add(bytes)
-			m.cpMgr.MarkTableCompleted(tableName, rows)
-			m.display.RemoveBar(tableName)
+			rowCount, err := m.getRowCount(ctx, table)
+			if err != nil {
+				logger.Warn("failed to get row count", zap.String("table", table), zap.Error(err))
+				rowCount = 0
+			}
 
-			logger.Info("table exported",
-				zap.String("table", tableName),
-				zap.Int64("rows", rows),
-				zap.Int64("bytes", bytes))
-		}(table, bar)
-	}
+			m.cpMgr.GetOrCreateTable(table, rowCount)
+			bar := m.display.AddBar(table, rowCount)
 
-	wg.Wait()
-	m.display.Stop()
+			sem <- struct{}{}
+			wg.Add(1)
 
-	if firstErr != nil && m.cfg.Migration.OnError != "skip" {
-		return nil, firstErr
-	}
+			go func(tableName string, bar *progress.Bar) {
+				defer wg.Done()
+				defer func() { <-sem }()
 
-	if opts.UseLightning {
+				m.cpMgr.MarkTableRunning(tableName)
+
+				rows, bytes, err := m.exportTable(ctx, tableName, opts)
+				if err != nil {
+					m.cpMgr.MarkTableFailed(tableName, err.Error())
+					m.display.RemoveBar(tableName)
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = cerrors.WithTable(
+							cerrors.Wrap(cerrors.ErrDataExport, "export table", err),
+							tableName)
+					}
+					errMu.Unlock()
+					return
+				}
+
+				bar.Set(rows)
+				totalRows.Add(rows)
+				totalBytes.Add(bytes)
+				m.cpMgr.MarkTableCompleted(tableName, rows)
+				m.display.RemoveBar(tableName)
+
+				logger.Info("table exported",
+					zap.String("table", tableName),
+					zap.Int64("rows", rows),
+					zap.Int64("bytes", bytes))
+			}(table, bar)
+		}
+
+		wg.Wait()
+		m.display.Stop()
+
+		if firstErr != nil && m.cfg.Migration.OnError != "skip" {
+			return nil, firstErr
+		}
+
 		if err := m.importViaLightning(ctx, opts); err != nil {
 			logger.Warn("LOAD DATA import failed, falling back to streaming INSERT", zap.Error(err))
 			if err := m.importViaSQL(ctx, opts); err != nil {
 				return nil, cerrors.Wrap(cerrors.ErrDataImport, "sql import", err)
 			}
 		}
-	} else {
-		if err := m.importViaSQL(ctx, opts); err != nil {
-			return nil, cerrors.Wrap(cerrors.ErrDataImport, "sql import", err)
-		}
 	}
 
 	duration := time.Since(startTime)
 	result := &common.DataResult{
-		TotalRows:   totalRows.Load(),
 		TotalTables: len(tables),
-		TotalBytes:  totalBytes.Load(),
 		Duration:    duration.String(),
 		ExportPath:  opts.TempDir,
 	}
@@ -595,7 +592,11 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 
 	tidbDB.SetConnMaxLifetime(5 * time.Minute)
 	tidbDB.SetConnMaxIdleTime(2 * time.Minute)
-	tidbDB.SetMaxOpenConns(2)
+	parallel := opts.Parallel
+	if parallel <= 0 {
+		parallel = 4
+	}
+	tidbDB.SetMaxOpenConns(parallel + 1)
 
 	if err := tidbDB.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping TiDB: %w", err)
@@ -617,93 +618,138 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 		batchSize = 5000
 	}
 
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
+	var firstErr error
+	var errMu sync.Mutex
+
 	for _, table := range tables {
-		logger.Info("streaming table to TiDB", zap.String("table", table))
+		m.cpMgr.GetOrCreateTable(table, 0)
+		m.cpMgr.MarkTableRunning(table)
 
-		// Get row count for progress
-		rowCount, _ := m.getRowCount(ctx, table)
-		if rowCount > 0 {
-			logger.Info("table row count", zap.String("table", table), zap.Int64("rows", rowCount))
-		}
+		sem <- struct{}{}
+		wg.Add(1)
 
-		selectQuery := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
-		rows, err := m.pgDB.QueryContext(ctx, selectQuery)
-		if err != nil {
-			if m.cfg.Migration.OnError != "skip" {
-				return fmt.Errorf("query %s: %w", table, err)
+		go func(tableName string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			if err := m.streamTable(ctx, tidbDB, schema, tableName, batchSize); err != nil {
+				m.cpMgr.MarkTableFailed(tableName, err.Error())
+				if m.cfg.Migration.OnError != "skip" {
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("stream table %s: %w", tableName, err)
+					}
+					errMu.Unlock()
+					return
+				}
+				logger.Warn("table stream error", zap.String("table", tableName), zap.Error(err))
+				return
 			}
-			logger.Warn("failed to query table", zap.String("table", table), zap.Error(err))
+		}(table)
+	}
+
+	wg.Wait()
+
+	if firstErr != nil {
+		return firstErr
+	}
+
+	return nil
+}
+
+func (m *Migrator) streamTable(ctx context.Context, tidbDB *sql.DB, schema, table string, batchSize int) error {
+	logger := zap.L()
+	logger.Info("streaming table to TiDB", zap.String("table", table))
+
+	rowCount, _ := m.getRowCount(ctx, table)
+	if rowCount > 0 {
+		logger.Info("table row count", zap.String("table", table), zap.Int64("rows", rowCount))
+	}
+	m.cpMgr.UpdateTable(table, func(tc *checkpoint.TableCheckpoint) {
+		tc.RowsTotal = rowCount
+	})
+
+	// Use a separate PG connection for this table
+	pgConn, err := m.pgDB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("get pg connection: %w", err)
+	}
+	defer pgConn.Close()
+
+	selectQuery := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
+	rows, err := pgConn.QueryContext(ctx, selectQuery)
+	if err != nil {
+		return fmt.Errorf("query %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	cols, err := rows.ColumnTypes()
+	if err != nil {
+		return fmt.Errorf("get columns for %s: %w", table, err)
+	}
+
+	colNames := make([]string, len(cols))
+	for i, col := range cols {
+		colNames[i] = quoteMySQL(col.Name())
+	}
+	colList := strings.Join(colNames, ", ")
+	placeholders := strings.Repeat("?,", len(cols))
+	placeholders = placeholders[:len(placeholders)-1]
+
+	insertBase := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		quoteMySQL(table), colList, placeholders)
+
+	var batch [][]interface{}
+	totalRows := 0
+
+	for rows.Next() {
+		values := make([]interface{}, len(cols))
+		valuePtrs := make([]interface{}, len(cols))
+		for i := range values {
+			valuePtrs[i] = &values[i]
+		}
+		if err := rows.Scan(valuePtrs...); err != nil {
+			logger.Warn("scan error", zap.String("table", table), zap.Error(err))
 			continue
 		}
 
-		cols, err := rows.ColumnTypes()
-		if err != nil {
-			rows.Close()
-			return fmt.Errorf("get columns for %s: %w", table, err)
+		converted := make([]interface{}, len(cols))
+		for i, v := range values {
+			converted[i] = convertSQLValue(v)
 		}
+		batch = append(batch, converted)
 
-		colNames := make([]string, len(cols))
-		for i, col := range cols {
-			colNames[i] = quoteMySQL(col.Name())
-		}
-		colList := strings.Join(colNames, ", ")
-		placeholders := strings.Repeat("?,", len(cols))
-		placeholders = placeholders[:len(placeholders)-1]
-
-		insertBase := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-			quoteMySQL(table), colList, placeholders)
-
-		var batch [][]interface{}
-		totalRows := 0
-
-		for rows.Next() {
-			values := make([]interface{}, len(cols))
-			valuePtrs := make([]interface{}, len(cols))
-			for i := range values {
-				valuePtrs[i] = &values[i]
-			}
-			if err := rows.Scan(valuePtrs...); err != nil {
-				logger.Warn("scan error", zap.String("table", table), zap.Error(err))
-				continue
-			}
-
-			converted := make([]interface{}, len(cols))
-			for i, v := range values {
-				converted[i] = convertSQLValue(v)
-			}
-			batch = append(batch, converted)
-
-			if len(batch) >= batchSize {
-				if err := m.execBatch(ctx, tidbDB, insertBase, batch, len(cols)); err != nil {
-					rows.Close()
-					if m.cfg.Migration.OnError != "skip" {
-						return fmt.Errorf("insert batch for %s: %w", table, err)
-					}
-					logger.Warn("batch insert error", zap.String("table", table), zap.Error(err))
-					batch = batch[:0]
-					continue
-				}
-				totalRows += len(batch)
-				logger.Info("batch inserted", zap.String("table", table), zap.Int("rows_in_batch", totalRows), zap.Int64("total", rowCount))
-				batch = batch[:0]
-			}
-		}
-		rows.Close()
-
-		if len(batch) > 0 {
+		if len(batch) >= batchSize {
 			if err := m.execBatch(ctx, tidbDB, insertBase, batch, len(cols)); err != nil {
 				if m.cfg.Migration.OnError != "skip" {
-					return fmt.Errorf("insert final batch for %s: %w", table, err)
+					return fmt.Errorf("insert batch for %s: %w", table, err)
 				}
-				logger.Warn("final batch error", zap.String("table", table), zap.Error(err))
-			} else {
-				totalRows += len(batch)
+				logger.Warn("batch insert error", zap.String("table", table), zap.Error(err))
+				batch = batch[:0]
+				continue
 			}
+			totalRows += len(batch)
+			m.cpMgr.UpdateTableProgress(table, int64(totalRows), 0)
+			logger.Info("batch inserted", zap.String("table", table), zap.Int("rows_in_batch", totalRows), zap.Int64("total", rowCount))
+			batch = batch[:0]
 		}
-
-		logger.Info("table import completed", zap.String("table", table), zap.Int("rows", totalRows))
 	}
 
+	if len(batch) > 0 {
+		if err := m.execBatch(ctx, tidbDB, insertBase, batch, len(cols)); err != nil {
+			if m.cfg.Migration.OnError != "skip" {
+				return fmt.Errorf("insert final batch for %s: %w", table, err)
+			}
+			logger.Warn("final batch error", zap.String("table", table), zap.Error(err))
+		} else {
+			totalRows += len(batch)
+		}
+	}
+
+	m.cpMgr.MarkTableCompleted(table, int64(totalRows))
+	logger.Info("table import completed", zap.String("table", table), zap.Int("rows", totalRows))
 	return nil
 }
 
@@ -766,19 +812,21 @@ func convertSQLValue(val interface{}) interface{} {
 	}
 	switch v := val.(type) {
 	case []byte:
-		s := string(v)
-		if json.Valid([]byte(s)) {
-			return s
-		}
-		if isPGArray(s) {
-			return pgArrayToJSON(s)
-		}
-		return s
+		return tryConvertArray(string(v))
+	case string:
+		return tryConvertArray(v)
 	case time.Time:
 		return v.Format("2006-01-02 15:04:05.999999")
 	default:
 		return v
 	}
+}
+
+func tryConvertArray(s string) interface{} {
+	if isPGArray(s) {
+		return pgArrayToJSON(s)
+	}
+	return s
 }
 
 func isPGArray(s string) bool {
@@ -794,17 +842,64 @@ func pgArrayToJSON(s string) string {
 		return "[]"
 	}
 
+	elements := splitPGArrayElements(inner)
+	parts := make([]string, 0, len(elements))
+	for _, elem := range elements {
+		elem = strings.TrimSpace(elem)
+		if elem == "" {
+			parts = append(parts, "null")
+		} else if elem == "NULL" || elem == "null" {
+			parts = append(parts, "null")
+		} else if elem == "t" {
+			parts = append(parts, "true")
+		} else if elem == "f" {
+			parts = append(parts, "false")
+		} else if len(elem) >= 2 && elem[0] == '"' && elem[len(elem)-1] == '"' {
+			unquoted := elem[1 : len(elem)-1]
+			unquoted = strings.ReplaceAll(unquoted, `\"`, `"`)
+			unquoted = strings.ReplaceAll(unquoted, `\\`, `\`)
+			b, _ := json.Marshal(unquoted)
+			parts = append(parts, string(b))
+		} else if elem[0] == '{' {
+			parts = append(parts, pgArrayToJSON(elem))
+		} else {
+			if _, err := strconv.ParseFloat(elem, 64); err == nil {
+				parts = append(parts, elem)
+			} else {
+				b, _ := json.Marshal(elem)
+				parts = append(parts, string(b))
+			}
+		}
+	}
+
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+func splitPGArrayElements(s string) []string {
 	var elements []string
 	current := ""
 	inQuote := false
+	escape := false
 	depth := 0
 
-	for i := 0; i < len(inner); i++ {
-		ch := inner[i]
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if escape {
+			current += string(ch)
+			escape = false
+			continue
+		}
+		if ch == '\\' {
+			escape = true
+			current += string(ch)
+			continue
+		}
 		if ch == '"' {
 			inQuote = !inQuote
 			current += string(ch)
-		} else if ch == '{' && !inQuote {
+			continue
+		}
+		if ch == '{' && !inQuote {
 			depth++
 			current += string(ch)
 		} else if ch == '}' && !inQuote {
@@ -820,36 +915,7 @@ func pgArrayToJSON(s string) string {
 	if current != "" || len(elements) > 0 {
 		elements = append(elements, current)
 	}
-
-	parts := make([]string, 0, len(elements))
-	for _, elem := range elements {
-		elem = strings.TrimSpace(elem)
-		if elem == "" {
-			parts = append(parts, `""`)
-		} else if elem == "NULL" || elem == "null" {
-			parts = append(parts, "null")
-		} else if elem[0] == '"' {
-			escaped := strings.ReplaceAll(elem, `\`, `\\`)
-			escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-			parts = append(parts, `"`+escaped[1:len(escaped)-1]+`"`)
-		} else if elem[0] == '{' {
-			parts = append(parts, pgArrayToJSON(elem))
-		} else if elem == "t" {
-			parts = append(parts, "true")
-		} else if elem == "f" {
-			parts = append(parts, "false")
-		} else {
-			if _, err := strconv.ParseFloat(elem, 64); err == nil {
-				parts = append(parts, elem)
-			} else {
-				escaped := strings.ReplaceAll(elem, `\`, `\\`)
-				escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-				parts = append(parts, `"`+escaped+`"`)
-			}
-		}
-	}
-
-	return "[" + strings.Join(parts, ",") + "]"
+	return elements
 }
 
 func convertValue(val interface{}) string {

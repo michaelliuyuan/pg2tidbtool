@@ -8,6 +8,12 @@ const router = useRouter()
 const loading = ref(false)
 const activeStep = ref(0)
 
+const availableTables = ref<{name: string; row_estimate: number}[]>([])
+const loadingTables = ref(false)
+const tableSearch = ref('')
+const selectedTables = ref<string[]>([])
+const selectAllTables = ref(false)
+
 const form = reactive({
   name: '',
   source: {
@@ -29,9 +35,9 @@ const form = reactive({
   opts: {
     parallel: 4,
     batch_size: 100000,
-    tables: '',
-    exclude_tables: '',
-    use_lightning: true,
+    tables: [] as string[],
+    exclude_tables: [] as string[],
+    use_lightning: false,
     skip_precheck: false,
     skip_schema: false,
     skip_data: false,
@@ -44,55 +50,6 @@ const sourceTestResult = ref<any>(null)
 const targetTestResult = ref<any>(null)
 const testingSource = ref(false)
 const testingTarget = ref(false)
-
-const tableList = ref<Array<{ name: string; row_estimate: number }>>([])
-const tableLoading = ref(false)
-const tableSearch = ref('')
-const selectedTables = ref<string[]>([])
-const selectAllTables = ref(false)
-const tablesLoaded = ref(false)
-
-const filteredTables = computed(() => {
-  if (!tableSearch.value) return tableList.value
-  const q = tableSearch.value.toLowerCase()
-  return tableList.value.filter(t => t.name.toLowerCase().includes(q))
-})
-
-async function loadTables() {
-  tableLoading.value = true
-  try {
-    const { data } = await apiClient.listTables({
-      host: form.source.host,
-      port: form.source.port,
-      user: form.source.user,
-      password: form.source.password,
-      database: form.source.database,
-      schema: form.source.schema,
-      sslmode: form.source.sslmode,
-    })
-    tableList.value = data.tables || []
-    tablesLoaded.value = true
-    selectedTables.value = []
-    selectAllTables.value = false
-  } catch (e: any) {
-    ElMessage.error(`获取表列表失败: ${e.response?.data?.error || e.message}`)
-  } finally {
-    tableLoading.value = false
-  }
-}
-
-function toggleSelectAll(val: boolean) {
-  if (val) {
-    selectedTables.value = filteredTables.value.map(t => t.name)
-  } else {
-    selectedTables.value = []
-  }
-}
-
-function onSelectionChange(val: string[]) {
-  selectedTables.value = val
-  selectAllTables.value = val.length === filteredTables.value.length && filteredTables.value.length > 0
-}
 
 const savedConnections = ref<Array<{ name: string; source: any; target: any }>>([])
 const saveConnName = ref('')
@@ -167,13 +124,6 @@ const rules: FormRules = {
   'target.database': [{ required: true, message: '请输入目标数据库名', trigger: 'blur' }],
 }
 
-function stepForward() {
-  if (activeStep.value === 1 && !tablesLoaded.value) {
-    loadTables()
-  }
-  activeStep.value++
-}
-
 async function testConnection(type: 'source' | 'target') {
   if (type === 'source') {
     testingSource.value = true
@@ -212,29 +162,66 @@ async function testConnection(type: 'source' | 'target') {
   }
 }
 
+async function loadTables() {
+  loadingTables.value = true
+  availableTables.value = []
+  selectedTables.value = []
+  try {
+    const { data } = await apiClient.listTables({
+      type: 'source',
+      host: form.source.host,
+      port: form.source.port,
+      user: form.source.user,
+      password: form.source.password,
+      database: form.source.database,
+      schema: form.source.schema,
+      sslmode: form.source.sslmode,
+    })
+    availableTables.value = data.tables || []
+    selectAllTables.value = false
+  } catch (e: any) {
+    ElMessage.error(`加载表列表失败: ${e.response?.data?.error || e.message}`)
+  } finally {
+    loadingTables.value = false
+  }
+}
+
+const filteredTables = computed(() => {
+  if (!tableSearch.value) return availableTables.value
+  const kw = tableSearch.value.toLowerCase()
+  return availableTables.value.filter(t => t.name.toLowerCase().includes(kw))
+})
+
+function toggleSelectAll() {
+  if (selectAllTables.value) {
+    selectedTables.value = availableTables.value.map(t => t.name)
+  } else {
+    selectedTables.value = []
+  }
+}
+
 async function submit() {
   loading.value = true
   try {
     localStorage.setItem('pg2tidb_last_connection', JSON.stringify({ source: form.source, target: form.target }))
 
-      const selectedTableList = selectedTables.value.length > 0 ? selectedTables.value : []
-      const { data } = await apiClient.createTask({
-        name: form.name || `Migration ${new Date().toLocaleString()}`,
-        source: { ...form.source },
-        target: { ...form.target },
-        opts: {
-          parallel: form.opts.parallel,
-          batch_size: form.opts.batch_size,
-          tables: selectedTableList.length > 0 ? selectedTableList : (form.opts.tables ? form.opts.tables.split(',').map(s => s.trim()).filter(Boolean) : []),
-          exclude_tables: form.opts.exclude_tables ? form.opts.exclude_tables.split(',').map(s => s.trim()).filter(Boolean) : [],
-          use_lightning: form.opts.use_lightning,
-          skip_precheck: form.opts.skip_precheck,
-          skip_schema: form.opts.skip_schema,
-          skip_data: form.opts.skip_data,
-          skip_validate: form.opts.skip_validate,
-          target_policy: form.opts.target_policy,
-        },
-      })
+    const { data } = await apiClient.createTask({
+      name: form.name || `Migration ${new Date().toLocaleString()}`,
+      source: { ...form.source },
+      target: { ...form.target },
+      opts: {
+        parallel: form.opts.parallel,
+        batch_size: form.opts.batch_size,
+        tables: selectedTables.value,
+        exclude_tables: [],
+        use_lightning: form.opts.use_lightning,
+        skip_precheck: form.opts.skip_precheck,
+        skip_schema: form.opts.skip_schema,
+        skip_data: form.opts.skip_data,
+        skip_validate: form.opts.skip_validate,
+        target_policy: form.opts.target_policy,
+      },
+    })
     ElMessage.success('迁移任务创建成功')
     await apiClient.startTask(data.id)
     router.push(`/tasks/${data.id}`)
@@ -246,6 +233,17 @@ async function submit() {
 }
 
 function nextStep() {
+  if (activeStep.value === 0 && !sourceTestResult.value?.ok) {
+    ElMessage.warning('请先测试源数据库连接')
+    return
+  }
+  if (activeStep.value === 1 && !targetTestResult.value?.ok) {
+    ElMessage.warning('请先测试目标数据库连接')
+    return
+  }
+  if (activeStep.value === 1) {
+    loadTables()
+  }
   activeStep.value++
 }
 function prevStep() {
@@ -350,58 +348,43 @@ function prevStep() {
           </el-form-item>
         </div>
 
-        <!-- Step 2: Table Selection -->
+        <!-- Step 2: Select Tables -->
         <div v-show="activeStep === 2">
-          <div style="margin-bottom: 16px; display: flex; justify-content: space-between; align-items: center;">
-            <div>
-              <el-button type="primary" :loading="tableLoading" @click="loadTables">
-                {{ tablesLoaded ? '刷新表列表' : '加载表列表' }}
-              </el-button>
-              <span v-if="tablesLoaded" style="margin-left: 12px; color: #909399;">
-                共 {{ tableList.length }} 张表，已选 {{ selectedTables.length }} 张
-              </span>
-            </div>
-            <el-input
-              v-if="tablesLoaded"
-              v-model="tableSearch"
-              placeholder="搜索表名"
-              style="width: 240px;"
-              clearable
-            >
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+            <el-input v-model="tableSearch" placeholder="搜索表名" style="width: 300px;" clearable>
               <template #prefix><el-icon><Search /></el-icon></template>
             </el-input>
-          </div>
-          <div v-if="!tablesLoaded" style="text-align: center; color: #909399; padding: 40px;">
-            请先点击「加载表列表」从源数据库获取表信息
-          </div>
-          <div v-else-if="tableLoading" style="text-align: center; padding: 40px;">
-            <el-icon class="is-loading" :size="24"><Loading /></el-icon>
-            <div style="margin-top: 8px; color: #909399;">正在加载表列表...</div>
-          </div>
-          <div v-else-if="filteredTables.length === 0" style="text-align: center; color: #909399; padding: 40px;">
-            {{ tableSearch ? '没有匹配的表' : '数据库中没有表' }}
-          </div>
-          <div v-else style="border: 1px solid #ebeef5; border-radius: 8px; max-height: 400px; overflow-y: auto;">
-            <div style="padding: 8px 12px; border-bottom: 1px solid #ebeef5; background: #fafafa; display: flex; align-items: center;">
+            <el-space>
               <el-checkbox v-model="selectAllTables" @change="toggleSelectAll">全选</el-checkbox>
-              <span style="margin-left: 12px; color: #909399; font-size: 12px;">
-                不选择任何表 = 迁移所有表
-              </span>
+              <span style="color: #909399; font-size: 13px;">已选 {{ selectedTables.length }} / {{ availableTables.length }} 张表</span>
+            </el-space>
+          </div>
+          <div v-if="loadingTables" v-loading="true" style="min-height: 200px;"></div>
+          <div v-else-if="availableTables.length === 0" style="color: #909399; text-align: center; padding: 40px;">
+            暂无表数据，请确认源数据库连接配置
+          </div>
+          <el-checkbox-group v-else v-model="selectedTables">
+            <div style="max-height: 400px; overflow-y: auto;">
+              <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                  <tr style="background: #f5f7fa; position: sticky; top: 0;">
+                    <th style="padding: 8px; text-align: left; width: 40px;"></th>
+                    <th style="padding: 8px; text-align: left;">表名</th>
+                    <th style="padding: 8px; text-align: right;">预估行数</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="table in filteredTables" :key="table.name" style="border-bottom: 1px solid #ebeef5;">
+                    <td style="padding: 6px 8px;"><el-checkbox :value="table.name" /></td>
+                    <td style="padding: 6px 8px;">{{ table.name }}</td>
+                    <td style="padding: 6px 8px; text-align: right; color: #909399;">{{ table.row_estimate >= 0 ? table.row_estimate.toLocaleString() : '-' }}</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
-            <el-checkbox-group v-model="selectedTables" @change="onSelectionChange">
-              <div
-                v-for="table in filteredTables"
-                :key="table.name"
-                style="padding: 8px 12px; border-bottom: 1px solid #f2f6fc; display: flex; align-items: center;"
-              >
-                <el-checkbox :label="table.name" :value="table.name">
-                  <span style="font-family: monospace;">{{ table.name }}</span>
-                </el-checkbox>
-                <span style="margin-left: auto; color: #909399; font-size: 12px;">
-                  {{ table.row_estimate >= 0 ? `约 ${table.row_estimate.toLocaleString()} 行` : '行数未知' }}
-                </span>
-              </div>
-            </el-checkbox-group>
+          </el-checkbox-group>
+          <div v-if="selectedTables.length === 0 && availableTables.length > 0" style="margin-top: 8px;">
+            <el-alert type="info" :closable="false" title="未选择任何表，将迁移所有表" />
           </div>
         </div>
 
@@ -409,15 +392,10 @@ function prevStep() {
         <div v-show="activeStep === 3">
           <el-form-item label="并发数">
             <el-input-number v-model="form.opts.parallel" :min="1" :max="32" />
+            <span style="color: #909399; font-size: 12px; margin-left: 8px;">同时迁移的表个数</span>
           </el-form-item>
           <el-form-item label="批次大小">
             <el-input-number v-model="form.opts.batch_size" :min="1000" :step="10000" />
-          </el-form-item>
-          <el-form-item label="指定表">
-            <el-input v-model="form.opts.tables" placeholder="逗号分隔，留空迁移所有表" />
-          </el-form-item>
-          <el-form-item label="排除表">
-            <el-input v-model="form.opts.exclude_tables" placeholder="逗号分隔" />
           </el-form-item>
           <el-form-item label="使用 Lightning">
             <el-switch v-model="form.opts.use_lightning" />
@@ -455,18 +433,12 @@ function prevStep() {
             <el-descriptions-item label="并发数">{{ form.opts.parallel }}</el-descriptions-item>
             <el-descriptions-item label="源数据库">{{ form.source.host }}:{{ form.source.port }}/{{ form.source.database }}</el-descriptions-item>
             <el-descriptions-item label="目标数据库">{{ form.target.host }}:{{ form.target.port }}/{{ form.target.database }}</el-descriptions-item>
+            <el-descriptions-item label="迁移表数">{{ selectedTables.length > 0 ? selectedTables.length : '全部 (' + availableTables.length + ')' }}</el-descriptions-item>
             <el-descriptions-item label="使用 Lightning">{{ form.opts.use_lightning ? '是' : '否' }}</el-descriptions-item>
-            <el-descriptions-item label="批次大小">{{ form.opts.batch_size }}</el-descriptions-item>
-            <el-descriptions-item label="迁移表">
-              {{ selectedTables.length > 0 ? `已选 ${selectedTables.length} 张表` : '迁移所有表' }}
-            </el-descriptions-item>
             <el-descriptions-item label="数据冲突策略">
               {{ form.opts.target_policy === 'truncate' ? '先清空表' : form.opts.target_policy === 'drop' ? '先删除表' : '直接插入' }}
             </el-descriptions-item>
           </el-descriptions>
-          <div v-if="selectedTables.length > 0" style="margin-top: 12px;">
-            <el-tag v-for="t in selectedTables" :key="t" style="margin: 2px;">{{ t }}</el-tag>
-          </div>
           <el-alert
             title="点击「开始迁移」将创建任务并立即开始执行迁移"
             type="warning"
@@ -477,7 +449,7 @@ function prevStep() {
 
         <el-form-item style="margin-top: 24px;">
           <el-button v-if="activeStep > 0" @click="prevStep">上一步</el-button>
-          <el-button v-if="activeStep < 4" type="primary" @click="stepForward">下一步</el-button>
+          <el-button v-if="activeStep < 4" type="primary" @click="nextStep">下一步</el-button>
           <el-button v-if="activeStep === 4" type="success" :loading="loading" @click="submit">
             开始迁移
           </el-button>

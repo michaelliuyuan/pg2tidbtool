@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -103,6 +104,7 @@ func NewServer(store *store.Store, host string, port int, dataDir string, static
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", s.handleHealth)
 		r.Post("/config/test-connection", s.handleTestConnection)
+		r.Post("/config/list-tables", s.handleListTables)
 		r.Post("/tasks", s.handleCreateTask)
 		r.Get("/tasks", s.handleListTasks)
 		r.Route("/tasks/{taskID}", func(r chi.Router) {
@@ -307,6 +309,73 @@ func (s *Server) testTiDBConnection(ctx context.Context, req *TestConnectionRequ
 	return result
 }
 
+func (s *Server) handleListTables(w http.ResponseWriter, r *http.Request) {
+	var req TestConnectionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Type != "source" {
+		s.writeError(w, http.StatusBadRequest, "type must be 'source'")
+		return
+	}
+
+	cfg := config.SourceConfig{
+		Host:     req.Host,
+		Port:     req.Port,
+		User:     req.User,
+		Password: req.Password,
+		Database: req.Database,
+		Schema:   req.Schema,
+		SSLMode:  req.SSLMode,
+	}
+	if cfg.Schema == "" {
+		cfg.Schema = "public"
+	}
+	if cfg.SSLMode == "" {
+		cfg.SSLMode = "disable"
+	}
+
+	pgConn, err := openPGTestConn(cfg.DSN())
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "connect failed: "+err.Error())
+		return
+	}
+	defer pgConn.Close()
+
+	rows, err := pgConn.QueryContext(r.Context(), `
+		SELECT table_name,
+		       (SELECT reltuples::bigint FROM pg_class WHERE oid = (quote_ident($1)||'.'||quote_ident(t.table_name))::regclass) AS row_estimate
+		FROM information_schema.tables t
+		WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+		ORDER BY table_name`, cfg.Schema)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "query tables: "+err.Error())
+		return
+	}
+	defer rows.Close()
+
+	type TableInfo struct {
+		Name       string `json:"name"`
+		RowEstimate int64  `json:"row_estimate"`
+	}
+	var tables []TableInfo
+	for rows.Next() {
+		var ti TableInfo
+		if err := rows.Scan(&ti.Name, &ti.RowEstimate); err != nil {
+			continue
+		}
+		tables = append(tables, ti)
+	}
+	if tables == nil {
+		tables = []TableInfo{}
+	}
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"tables": tables,
+		"count":  len(tables),
+	})
+}
+
 type CreateTaskRequest struct {
 	Name   string         `json:"name"`
 	Source config.SourceConfig   `json:"source"`
@@ -434,6 +503,13 @@ func (s *Server) handleStartTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Reset all progress fields for a fresh run
+	_ = s.store.ResetTaskForRerun(taskID)
+
+	// Clear old logs and checkpoint data
+	s.logCollector.RemoveBuffer(taskID)
+	os.RemoveAll(fmt.Sprintf(".checkpoint/%s", taskID))
+
 	ctx, cancel := context.WithCancel(context.Background())
 	s.runningTasks[taskID] = cancel
 
@@ -478,6 +554,43 @@ func (s *Server) runMigration(ctx context.Context, taskID string, cfg config.Con
 		return
 	}
 
+	// Final progress sync from checkpoint
+	if cpMgr, cpErr := checkpoint.NewManager(cfg.Migration.CheckpointDir); cpErr == nil {
+		cpPhase := cpMgr.GetPhase()
+		if cpPhase == "data-migration" {
+			cpPhase = "data"
+		}
+		cpTables := cpMgr.GetAllTables()
+		var tDone, tTotal int
+		var rDone, rTotal int64
+		for _, tc := range cpTables {
+			tTotal++
+			rTotal += tc.RowsTotal
+			rDone += tc.RowsDone
+			if tc.State == checkpoint.StateCompleted || tc.State == checkpoint.StateFailed {
+				tDone++
+			}
+		}
+		var prog float64
+		if rTotal > 0 {
+			prog = float64(rDone) / float64(rTotal)
+			if prog > 1.0 {
+				prog = 1.0
+			}
+		} else if tTotal > 0 {
+			prog = float64(tDone) / float64(tTotal)
+		}
+		_ = s.store.UpdateTaskProgress(taskID, cpPhase, prog, tDone, tTotal, rDone, rTotal)
+		s.BroadcastProgress(taskID, map[string]interface{}{
+			"phase":        cpPhase,
+			"progress":     prog,
+			"tables_done":  tDone,
+			"tables_total": tTotal,
+			"rows_done":    rDone,
+			"rows_total":   rTotal,
+		})
+	}
+
 	resultData, _ := json.Marshal(results)
 	s.store.SetTaskResult(taskID, string(resultData))
 
@@ -512,6 +625,9 @@ func (s *Server) pollProgress(ctx context.Context, taskID string, checkpointDir 
 			}
 
 			phase := cpMgr.GetPhase()
+			if phase == "data-migration" {
+				phase = "data"
+			}
 			tables := cpMgr.GetAllTables()
 
 			var tablesDone, tablesTotal int
@@ -775,14 +891,15 @@ func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type PhaseInfo struct {
-		Name        string                 `json:"name"`
-		Label       string                 `json:"label"`
-		Status      string                 `json:"status"`
+		Name        string                   `json:"name"`
+		Label       string                   `json:"label"`
+		Status      string                   `json:"status"`
 		Tables      []map[string]interface{} `json:"tables,omitempty"`
-		TableCount  int                    `json:"table_count"`
-		TablesDone  int                    `json:"tables_done"`
-		RowsTotal   int64                  `json:"rows_total"`
-		RowsDone    int64                  `json:"rows_done"`
+		TableCount  int                      `json:"table_count"`
+		TablesDone  int                      `json:"tables_done"`
+		RowsTotal   int64                    `json:"rows_total"`
+		RowsDone    int64                    `json:"rows_done"`
+		Logs        []map[string]interface{} `json:"logs,omitempty"`
 	}
 
 	phaseNames := []struct{ name, label string }{
@@ -821,7 +938,7 @@ func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if p.name == "data" || p.name == "schema" {
+		if p.name == "data" {
 			cpMgr, cpErr := checkpoint.NewManager(fmt.Sprintf(".checkpoint/%s", taskID))
 			if cpErr == nil {
 				tables := cpMgr.GetAllTables()
@@ -842,6 +959,33 @@ func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+			}
+		}
+
+		logs := s.logCollector.GetBuffer(taskID).GetAll()
+		phaseLabel := p.label
+		inPhase := false
+		for _, entry := range logs {
+			if strings.Contains(entry.Message, "Phase: "+phaseLabel) {
+				inPhase = true
+				continue
+			}
+			if inPhase {
+				nextPhaseIdx := -1
+				for _, pp := range phaseNames {
+					if pp.label != phaseLabel && strings.Contains(entry.Message, "Phase: "+pp.label) {
+						nextPhaseIdx = 1
+						break
+					}
+				}
+				if nextPhaseIdx >= 0 || strings.Contains(entry.Message, "Migration task started") || strings.Contains(entry.Message, "migration pipeline completed") {
+					break
+				}
+				pi.Logs = append(pi.Logs, map[string]interface{}{
+					"level":     entry.Level,
+					"message":   entry.Message,
+					"timestamp": entry.Timestamp,
+				})
 			}
 		}
 

@@ -40,6 +40,7 @@ export interface PhaseInfo {
   tables_done: number
   rows_total: number
   rows_done: number
+  logs?: { level: string; message: string; timestamp: string }[]
 }
 
 export interface TaskPhasesResponse {
@@ -115,34 +116,14 @@ export interface CreateTaskRequest {
   }
 }
 
-export interface ListTablesRequest {
-  host: string
-  port: number
-  user: string
-  password: string
-  database: string
-  schema: string
-  sslmode: string
-}
-
-export interface ListTablesResult {
-  name: string
-  row_estimate: number
-}
-
-export interface ListTablesResponse {
-  count: number
-  tables: ListTablesResult[]
-}
-
 export const apiClient = {
   health: () => api.get('/health'),
 
   testConnection: (req: ConnectionTestRequest) =>
     api.post<ConnectionTestResult>('/config/test-connection', req),
 
-  listTables: (req: ListTablesRequest) =>
-    api.post<ListTablesResponse>('/config/list-tables', req),
+  listTables: (req: ConnectionTestRequest) =>
+    api.post<{ tables: { name: string; row_estimate: number }[]; count: number }>('/config/list-tables', { ...req, type: 'source' }),
 
   createTask: (req: CreateTaskRequest) =>
     api.post<Task>('/tasks', req),
