@@ -825,7 +825,7 @@ func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if p.name == "data" || p.name == "schema" || p.name == "precheck" || p.name == "validate" {
+		if p.name == "data" {
 			cpMgr, cpErr := checkpoint.NewManager(fmt.Sprintf(".checkpoint/%s", taskID))
 			if cpErr == nil {
 				tables := cpMgr.GetAllTables()
@@ -847,32 +847,32 @@ func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+		}
 
-			logs := s.logCollector.GetBuffer(taskID).GetAll()
-			phaseLabel := p.label
-			inPhase := false
-			for _, entry := range logs {
-				if strings.Contains(entry.Message, "Phase: "+phaseLabel) {
-					inPhase = true
-					continue
-				}
-				if inPhase {
-					nextPhaseIdx := -1
-					for _, pp := range phaseNames {
-						if pp.label != phaseLabel && strings.Contains(entry.Message, "Phase: "+pp.label) {
-							nextPhaseIdx = 1
-							break
-						}
-					}
-					if nextPhaseIdx >= 0 || strings.Contains(entry.Message, "Migration task started") || strings.Contains(entry.Message, "migration pipeline completed") {
+		logs := s.logCollector.GetBuffer(taskID).GetAll()
+		phaseLabel := p.label
+		inPhase := false
+		for _, entry := range logs {
+			if strings.Contains(entry.Message, "Phase: "+phaseLabel) {
+				inPhase = true
+				continue
+			}
+			if inPhase {
+				nextPhaseIdx := -1
+				for _, pp := range phaseNames {
+					if pp.label != phaseLabel && strings.Contains(entry.Message, "Phase: "+pp.label) {
+						nextPhaseIdx = 1
 						break
 					}
-					pi.Logs = append(pi.Logs, map[string]interface{}{
-						"level":     entry.Level,
-						"message":   entry.Message,
-						"timestamp": entry.Timestamp,
-					})
 				}
+				if nextPhaseIdx >= 0 || strings.Contains(entry.Message, "Migration task started") || strings.Contains(entry.Message, "migration pipeline completed") {
+					break
+				}
+				pi.Logs = append(pi.Logs, map[string]interface{}{
+					"level":     entry.Level,
+					"message":   entry.Message,
+					"timestamp": entry.Timestamp,
+				})
 			}
 		}
 
