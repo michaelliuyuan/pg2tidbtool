@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -591,12 +592,80 @@ func convertSQLValue(val interface{}) interface{} {
 	}
 	switch v := val.(type) {
 	case []byte:
-		return string(v)
+		s := string(v)
+		if len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}' {
+			return pgArrayToJSON(s)
+		}
+		return s
 	case time.Time:
 		return v.Format("2006-01-02 15:04:05.999999")
 	default:
 		return v
 	}
+}
+
+func pgArrayToJSON(s string) string {
+	inner := s[1 : len(s)-1]
+	if inner == "" {
+		return "[]"
+	}
+
+	var elements []string
+	current := ""
+	inQuote := false
+	depth := 0
+
+	for i := 0; i < len(inner); i++ {
+		ch := inner[i]
+		if ch == '"' {
+			inQuote = !inQuote
+			current += string(ch)
+		} else if ch == '{' && !inQuote {
+			depth++
+			current += string(ch)
+		} else if ch == '}' && !inQuote {
+			depth--
+			current += string(ch)
+		} else if ch == ',' && !inQuote && depth == 0 {
+			elements = append(elements, current)
+			current = ""
+		} else {
+			current += string(ch)
+		}
+	}
+	if current != "" || len(elements) > 0 {
+		elements = append(elements, current)
+	}
+
+	parts := make([]string, 0, len(elements))
+	for _, elem := range elements {
+		elem = strings.TrimSpace(elem)
+		if elem == "" {
+			parts = append(parts, `""`)
+		} else if elem == "NULL" || elem == "null" {
+			parts = append(parts, "null")
+		} else if elem[0] == '"' {
+			escaped := strings.ReplaceAll(elem, `\`, `\\`)
+			escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+			parts = append(parts, `"`+escaped[1:len(escaped)-1]+`"`)
+		} else if elem[0] == '{' {
+			parts = append(parts, pgArrayToJSON(elem))
+		} else if elem == "t" {
+			parts = append(parts, "true")
+		} else if elem == "f" {
+			parts = append(parts, "false")
+		} else {
+			if _, err := strconv.ParseFloat(elem, 64); err == nil {
+				parts = append(parts, elem)
+			} else {
+				escaped := strings.ReplaceAll(elem, `\`, `\\`)
+				escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+				parts = append(parts, `"`+escaped+`"`)
+			}
+		}
+	}
+
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 func convertValue(val interface{}) string {
