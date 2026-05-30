@@ -189,6 +189,17 @@ func (s *Store) SetTaskError(id string, taskErr string) error {
 	return err
 }
 
+func (s *Store) ResetTaskForRerun(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	_, err := s.db.Exec(`UPDATE tasks SET phase='', progress=0, tables_done=0, tables_total=0,
+		rows_done=0, rows_total=0, error='', result_json='', finished_at=NULL, updated_at=? WHERE id=?`,
+		now, id)
+	return err
+}
+
 func (s *Store) SetTaskResult(id string, result interface{}) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

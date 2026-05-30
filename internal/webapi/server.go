@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -433,6 +434,13 @@ func (s *Server) handleStartTask(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	// Reset all progress fields for a fresh run
+	_ = s.store.ResetTaskForRerun(taskID)
+
+	// Clear old logs and checkpoint data
+	s.logCollector.RemoveBuffer(taskID)
+	os.RemoveAll(fmt.Sprintf(".checkpoint/%s", taskID))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.runningTasks[taskID] = cancel
