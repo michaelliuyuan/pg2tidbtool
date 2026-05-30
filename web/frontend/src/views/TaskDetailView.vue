@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import apiClient from '../api'
-import type { Task } from '../api'
+import type { Task, TaskLogEntry } from '../api'
 
 const route = useRoute()
 const router = useRouter()
@@ -12,6 +12,13 @@ const task = ref<Task | null>(null)
 const loading = ref(true)
 const ws = ref<WebSocket | null>(null)
 const wsProgress = ref<any>(null)
+
+const logDrawerVisible = ref(false)
+const logs = ref<TaskLogEntry[]>([])
+const logsLoading = ref(false)
+const logAutoScroll = ref(true)
+const logWs = ref<WebSocket | null>(null)
+const logContainer = ref<HTMLElement | null>(null)
 
 const statusMap: Record<string, { type: string; label: string }> = {
   created: { type: 'info', label: '已创建' },
@@ -102,6 +109,7 @@ onMounted(() => {
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
   if (ws.value) ws.value.close()
+  if (logWs.value) logWs.value.close()
 })
 
 async function action(actionName: string) {
@@ -143,6 +151,63 @@ async function downloadReport() {
   a.download = `report-${taskId}.json`
   a.click()
   URL.revokeObjectURL(url)
+}
+
+async function openLogs() {
+  logDrawerVisible.value = true
+  logsLoading.value = true
+  logs.value = []
+  try {
+    const { data } = await apiClient.getTaskLogs(taskId)
+    logs.value = data.logs || []
+  } catch {
+    ElMessage.error('获取日志失败')
+  } finally {
+    logsLoading.value = false
+  }
+  await nextTick()
+  scrollToBottom()
+  connectLogWS()
+}
+
+function closeLogs() {
+  logDrawerVisible.value = false
+  if (logWs.value) {
+    logWs.value.close()
+    logWs.value = null
+  }
+}
+
+function connectLogWS() {
+  if (logWs.value) {
+    logWs.value.close()
+  }
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+  logWs.value = new WebSocket(`${proto}//${location.host}/api/v1/tasks/${taskId}/logs?ws=true`)
+  logWs.value.onmessage = (event) => {
+    try {
+      const entry: TaskLogEntry = JSON.parse(event.data)
+      logs.value.push(entry)
+      if (logAutoScroll.value) {
+        nextTick(() => scrollToBottom())
+      }
+    } catch {}
+  }
+}
+
+function scrollToBottom() {
+  if (logContainer.value) {
+    logContainer.value.scrollTop = logContainer.value.scrollHeight
+  }
+}
+
+function logLevelClass(level: string): string {
+  switch (level) {
+    case 'ERROR': case 'FATAL': return 'log-error'
+    case 'WARN': return 'log-warn'
+    case 'DEBUG': return 'log-debug'
+    default: return 'log-info'
+  }
 }
 </script>
 
@@ -202,6 +267,9 @@ async function downloadReport() {
           <el-button v-if="task.status !== 'running'" type="danger" plain @click="deleteTask">
             <el-icon><Delete /></el-icon> 删除任务
           </el-button>
+          <el-button v-if="task.status !== 'created'" type="primary" plain @click="openLogs">
+            <el-icon><Document /></el-icon> 查看日志
+          </el-button>
         </el-space>
       </el-card>
 
@@ -221,5 +289,70 @@ async function downloadReport() {
         </el-descriptions>
       </el-card>
     </template>
+
+    <!-- Log Drawer -->
+    <el-drawer v-model="logDrawerVisible" title="任务日志" size="60%" :before-close="closeLogs" direction="rtl">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <el-checkbox v-model="logAutoScroll">自动滚动</el-checkbox>
+        <el-button size="small" @click="() => { logs = []; connectLogWS() }">清空并重新加载</el-button>
+      </div>
+      <div ref="logContainer" v-loading="logsLoading" class="log-container">
+        <div v-if="logs.length === 0 && !logsLoading" style="color: #999; text-align: center; padding: 40px;">
+          暂无日志
+        </div>
+        <div v-for="(log, idx) in logs" :key="idx" class="log-line" :class="logLevelClass(log.level)">
+          <span class="log-time">{{ log.timestamp ? log.timestamp.replace('T', ' ').substring(0, 19) : '' }}</span>
+          <span class="log-level">[{{ log.level }}]</span>
+          <span class="log-msg">{{ log.message }}</span>
+          <span v-if="log.caller" class="log-caller">({{ log.caller }})</span>
+        </div>
+      </div>
+    </el-drawer>
   </div>
 </template>
+
+<style scoped>
+.log-container {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 12px;
+  border-radius: 6px;
+  height: calc(100vh - 180px);
+  overflow-y: auto;
+}
+
+.log-line {
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.log-time {
+  color: #6a9955;
+  margin-right: 8px;
+}
+
+.log-level {
+  font-weight: bold;
+  margin-right: 8px;
+}
+
+.log-msg {
+  color: #d4d4d4;
+}
+
+.log-caller {
+  color: #608b4e;
+  margin-left: 8px;
+  font-size: 12px;
+}
+
+.log-info .log-level { color: #4ec9b0; }
+.log-warn .log-level { color: #dcdcaa; }
+.log-error .log-level { color: #f44747; }
+.log-debug .log-level { color: #608b4e; }
+.log-error { background: rgba(244, 71, 71, 0.1); }
+.log-warn { background: rgba(220, 220, 170, 0.08); }
+</style>

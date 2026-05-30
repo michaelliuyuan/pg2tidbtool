@@ -26,13 +26,18 @@ var upgrader = websocket.Upgrader{
 }
 
 type Server struct {
-	router chi.Router
-	store  *store.Store
-	addr   string
-	hub    *Hub
+	router       chi.Router
+	store        *store.Store
+	addr         string
+	hub          *Hub
+	dataDir      string
 
 	// running tasks
 	runningTasks map[string]context.CancelFunc
+
+	// log collection
+	logCollector *LogCollector
+	logCores     map[string]*TaskLogCore
 }
 
 type Hub struct {
@@ -70,12 +75,15 @@ func (h *Hub) Run() {
 	}
 }
 
-func NewServer(store *store.Store, host string, port int, staticFS embed.FS) *Server {
+func NewServer(store *store.Store, host string, port int, dataDir string, staticFS embed.FS) *Server {
 	s := &Server{
 		store:        store,
 		addr:         fmt.Sprintf("%s:%d", host, port),
 		hub:          newHub(),
 		runningTasks: make(map[string]context.CancelFunc),
+		dataDir:      dataDir,
+		logCollector: NewLogCollector(),
+		logCores:     make(map[string]*TaskLogCore),
 	}
 
 	r := chi.NewRouter()
@@ -104,6 +112,7 @@ func NewServer(store *store.Store, host string, port int, staticFS embed.FS) *Se
 			r.Delete("/", s.handleDeleteTask)
 			r.Get("/progress", s.handleTaskProgress)
 			r.Get("/report", s.handleTaskReport)
+			r.Get("/logs", s.handleTaskLogs)
 		})
 		r.Get("/ws", s.handleWebSocket)
 	})
@@ -429,17 +438,28 @@ func (s *Server) handleStartTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) runMigration(ctx context.Context, taskID string, cfg config.Config) {
-	_ = zap.L()
-	o := orchestrator.NewOrchestrator(cfg)
+	logCore := NewTaskLogCore(s.logCollector, taskID, nil)
+	s.logCores[taskID] = logCore
 
+	defer func() {
+		logCore.Disable()
+		delete(s.logCores, taskID)
+	}()
+
+	s.logCollector.GetBuffer(taskID)
+	s.logCollector.Append(taskID, "INFO", "Migration task started", "")
+
+	o := orchestrator.NewOrchestrator(cfg)
 	results, err := o.Run(ctx, orchestrator.PipelineConfig{})
 
 	if ctx.Err() == context.Canceled {
+		s.logCollector.Append(taskID, "WARN", "Migration task cancelled", "")
 		s.store.UpdateTaskStatus(taskID, store.TaskStatusCancelled)
 		return
 	}
 
 	if err != nil {
+		s.logCollector.Append(taskID, "ERROR", "Migration failed: "+err.Error(), "")
 		s.store.SetTaskError(taskID, err.Error())
 		return
 	}
@@ -455,8 +475,10 @@ func (s *Server) runMigration(ctx context.Context, taskID string, cfg config.Con
 		}
 	}
 	if allSuccess {
+		s.logCollector.Append(taskID, "INFO", "Migration completed successfully", "")
 		s.store.UpdateTaskStatus(taskID, store.TaskStatusCompleted)
 	} else {
+		s.logCollector.Append(taskID, "WARN", "Migration completed with errors", "")
 		s.store.UpdateTaskStatus(taskID, store.TaskStatusFailed)
 	}
 }
@@ -596,6 +618,80 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		_, _, err := conn.ReadMessage()
 		if err != nil {
 			break
+		}
+	}
+}
+
+func (s *Server) handleTaskLogs(w http.ResponseWriter, r *http.Request) {
+	taskID := chi.URLParam(r, "taskID")
+	task, err := s.store.GetTask(taskID)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if task == nil {
+		s.writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+
+	upgrade := r.URL.Query().Get("ws")
+	if upgrade == "true" {
+		s.handleLogStream(w, r, taskID)
+		return
+	}
+
+	logs := s.logCollector.GetBuffer(taskID).GetAll()
+	if logs == nil {
+		logs = []TaskLogEntry{}
+	}
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"task_id": taskID,
+		"logs":    logs,
+		"count":   len(logs),
+	})
+}
+
+func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request, taskID string) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+
+	buf := s.logCollector.GetBuffer(taskID)
+	ch := buf.Subscribe()
+	defer buf.Unsubscribe(ch)
+
+	existingLogs := buf.GetAll()
+	for _, entry := range existingLogs {
+		data, _ := json.Marshal(entry)
+		if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+			return
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			_, _, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case entry, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(entry)
+			if err := conn.WriteMessage(websocket.TextMessage, data); err != nil {
+				return
+			}
+		case <-done:
+			return
 		}
 	}
 }

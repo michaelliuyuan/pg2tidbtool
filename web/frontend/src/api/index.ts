@@ -24,6 +24,19 @@ export interface Task {
   updated_at: string
 }
 
+export interface TaskLogEntry {
+  timestamp: string
+  level: string
+  message: string
+  caller?: string
+}
+
+export interface TaskLogsResponse {
+  task_id: string
+  logs: TaskLogEntry[]
+  count: number
+}
+
 export interface ConnectionTestRequest {
   type: 'source' | 'target'
   host: string
@@ -112,6 +125,9 @@ export const apiClient = {
 
   getTaskReport: (id: string, format?: string) =>
     api.get(`/tasks/${id}/report`, { params: { format } }),
+
+  getTaskLogs: (id: string) =>
+    api.get<TaskLogsResponse>(`/tasks/${id}/logs`),
 }
 
 export default apiClient

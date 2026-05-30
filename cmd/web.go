@@ -36,7 +36,7 @@ Default URL: http://localhost:8080`,
 		}
 		defer s.Close()
 
-		srv := webapi.NewServer(s, webHost, webPort, StaticFS)
+		srv := webapi.NewServer(s, webHost, webPort, dataDir, StaticFS)
 		fmt.Fprintf(os.Stderr, "pg2tidb web UI: http://%s:%d\n", webHost, webPort)
 		return srv.Start()
 	},
