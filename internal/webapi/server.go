@@ -486,6 +486,43 @@ func (s *Server) runMigration(ctx context.Context, taskID string, cfg config.Con
 		return
 	}
 
+	// Final progress sync from checkpoint
+	if cpMgr, cpErr := checkpoint.NewManager(cfg.Migration.CheckpointDir); cpErr == nil {
+		cpPhase := cpMgr.GetPhase()
+		if cpPhase == "data-migration" {
+			cpPhase = "data"
+		}
+		cpTables := cpMgr.GetAllTables()
+		var tDone, tTotal int
+		var rDone, rTotal int64
+		for _, tc := range cpTables {
+			tTotal++
+			rTotal += tc.RowsTotal
+			rDone += tc.RowsDone
+			if tc.State == checkpoint.StateCompleted || tc.State == checkpoint.StateFailed {
+				tDone++
+			}
+		}
+		var prog float64
+		if rTotal > 0 {
+			prog = float64(rDone) / float64(rTotal)
+			if prog > 1.0 {
+				prog = 1.0
+			}
+		} else if tTotal > 0 {
+			prog = float64(tDone) / float64(tTotal)
+		}
+		_ = s.store.UpdateTaskProgress(taskID, cpPhase, prog, tDone, tTotal, rDone, rTotal)
+		s.BroadcastProgress(taskID, map[string]interface{}{
+			"phase":        cpPhase,
+			"progress":     prog,
+			"tables_done":  tDone,
+			"tables_total": tTotal,
+			"rows_done":    rDone,
+			"rows_total":   rTotal,
+		})
+	}
+
 	resultData, _ := json.Marshal(results)
 	s.store.SetTaskResult(taskID, string(resultData))
 
