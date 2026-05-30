@@ -78,93 +78,93 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 
 	logger.Info("migrating tables", zap.Int("count", len(tables)))
 
-	m.display = progress.NewDisplay()
-	m.display.Start()
-
-	var totalRows atomic.Int64
-	var totalBytes atomic.Int64
-
-	sem := make(chan struct{}, opts.Parallel)
-	var wg sync.WaitGroup
-	var firstErr error
-	var errMu sync.Mutex
-
-	for _, table := range tables {
-		if m.cpMgr.IsTableCompleted(table) {
-			logger.Info("skipping completed table", zap.String("table", table))
-			continue
+	if !opts.UseLightning {
+		// Streaming INSERT path: skip CSV export, import directly via SQL
+		if err := m.importViaSQL(ctx, opts); err != nil {
+			return nil, cerrors.Wrap(cerrors.ErrDataImport, "sql import", err)
 		}
+	} else {
+		// CSV export + LOAD DATA path
+		m.display = progress.NewDisplay()
+		m.display.Start()
 
-		rowCount, err := m.getRowCount(ctx, table)
-		if err != nil {
-			logger.Warn("failed to get row count", zap.String("table", table), zap.Error(err))
-			rowCount = 0
-		}
+		var totalRows atomic.Int64
+		var totalBytes atomic.Int64
 
-		m.cpMgr.GetOrCreateTable(table, rowCount)
-		bar := m.display.AddBar(table, rowCount)
+		sem := make(chan struct{}, opts.Parallel)
+		var wg sync.WaitGroup
+		var firstErr error
+		var errMu sync.Mutex
 
-		sem <- struct{}{}
-		wg.Add(1)
-
-		go func(tableName string, bar *progress.Bar) {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			m.cpMgr.MarkTableRunning(tableName)
-
-			rows, bytes, err := m.exportTable(ctx, tableName, opts)
-			if err != nil {
-				m.cpMgr.MarkTableFailed(tableName, err.Error())
-				m.display.RemoveBar(tableName)
-				errMu.Lock()
-				if firstErr == nil {
-					firstErr = cerrors.WithTable(
-						cerrors.Wrap(cerrors.ErrDataExport, "export table", err),
-						tableName)
-				}
-				errMu.Unlock()
-				return
+		for _, table := range tables {
+			if m.cpMgr.IsTableCompleted(table) {
+				logger.Info("skipping completed table", zap.String("table", table))
+				continue
 			}
 
-			bar.Set(rows)
-			totalRows.Add(rows)
-			totalBytes.Add(bytes)
-			m.cpMgr.MarkTableCompleted(tableName, rows)
-			m.display.RemoveBar(tableName)
+			rowCount, err := m.getRowCount(ctx, table)
+			if err != nil {
+				logger.Warn("failed to get row count", zap.String("table", table), zap.Error(err))
+				rowCount = 0
+			}
 
-			logger.Info("table exported",
-				zap.String("table", tableName),
-				zap.Int64("rows", rows),
-				zap.Int64("bytes", bytes))
-		}(table, bar)
-	}
+			m.cpMgr.GetOrCreateTable(table, rowCount)
+			bar := m.display.AddBar(table, rowCount)
 
-	wg.Wait()
-	m.display.Stop()
+			sem <- struct{}{}
+			wg.Add(1)
 
-	if firstErr != nil && m.cfg.Migration.OnError != "skip" {
-		return nil, firstErr
-	}
+			go func(tableName string, bar *progress.Bar) {
+				defer wg.Done()
+				defer func() { <-sem }()
 
-	if opts.UseLightning {
+				m.cpMgr.MarkTableRunning(tableName)
+
+				rows, bytes, err := m.exportTable(ctx, tableName, opts)
+				if err != nil {
+					m.cpMgr.MarkTableFailed(tableName, err.Error())
+					m.display.RemoveBar(tableName)
+					errMu.Lock()
+					if firstErr == nil {
+						firstErr = cerrors.WithTable(
+							cerrors.Wrap(cerrors.ErrDataExport, "export table", err),
+							tableName)
+					}
+					errMu.Unlock()
+					return
+				}
+
+				bar.Set(rows)
+				totalRows.Add(rows)
+				totalBytes.Add(bytes)
+				m.cpMgr.MarkTableCompleted(tableName, rows)
+				m.display.RemoveBar(tableName)
+
+				logger.Info("table exported",
+					zap.String("table", tableName),
+					zap.Int64("rows", rows),
+					zap.Int64("bytes", bytes))
+			}(table, bar)
+		}
+
+		wg.Wait()
+		m.display.Stop()
+
+		if firstErr != nil && m.cfg.Migration.OnError != "skip" {
+			return nil, firstErr
+		}
+
 		if err := m.importViaLightning(ctx, opts); err != nil {
 			logger.Warn("LOAD DATA import failed, falling back to streaming INSERT", zap.Error(err))
 			if err := m.importViaSQL(ctx, opts); err != nil {
 				return nil, cerrors.Wrap(cerrors.ErrDataImport, "sql import", err)
 			}
 		}
-	} else {
-		if err := m.importViaSQL(ctx, opts); err != nil {
-			return nil, cerrors.Wrap(cerrors.ErrDataImport, "sql import", err)
-		}
 	}
 
 	duration := time.Since(startTime)
 	result := &common.DataResult{
-		TotalRows:   totalRows.Load(),
 		TotalTables: len(tables),
-		TotalBytes:  totalBytes.Load(),
 		Duration:    duration.String(),
 		ExportPath:  opts.TempDir,
 	}
