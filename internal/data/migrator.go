@@ -666,8 +666,10 @@ func (m *Migrator) streamTable(ctx context.Context, tidbDB *sql.DB, schema, tabl
 	rowCount, _ := m.getRowCount(ctx, table)
 	if rowCount > 0 {
 		logger.Info("table row count", zap.String("table", table), zap.Int64("rows", rowCount))
-		m.cpMgr.UpdateTableProgress(table, 0, rowCount)
 	}
+	m.cpMgr.UpdateTable(table, func(tc *checkpoint.TableCheckpoint) {
+		tc.RowsTotal = rowCount
+	})
 
 	// Use a separate PG connection for this table
 	pgConn, err := m.pgDB.Conn(ctx)
