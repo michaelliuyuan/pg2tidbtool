@@ -8,6 +8,7 @@
 - **Data Migration** — 基于 PG COPY + TiDB Lightning 实现高性能并行数据迁移
 - **Data Validation** — 三层校验策略（行数/抽样/Checksum）确保数据一致性
 - **Web Monitor** — 可选轻量监控面板，实时查看迁移进度和校验结果
+- **Web UI** — 完整 Web 管理界面（`pg2tidb web`），可视化配置、实时监控、迁移历史
 - **断点续传** — Checkpoint 机制支持中断后恢复
 - **兼容性评估** — 迁移前扫描不兼容对象，输出风险报告
 
@@ -90,6 +91,7 @@ Commands:
   schema             Schema 迁移
   data               全量数据迁移
   validate           数据校验
+  web                启动 Web 管理界面
 
 Flags:
   -c, --config string   配置文件路径 (默认 "configs/config.yaml")
@@ -173,7 +175,53 @@ web:
 | array | JSON | 序列化为 JSON 数组 |
 | gin/gist 索引 | 跳过 | 记录告警日志 |
 
-## Web 监控面板
+## Web 管理界面
+
+### 启动 Web UI
+
+```bash
+# 本地启动
+./pg2tidb web --port 8080
+
+# Docker 启动（默认启动 Web 模式）
+docker run -p 8080:8080 pg2tidb
+
+# 自定义数据目录
+./pg2tidb web --data /data/pg2tidb --port 8080
+```
+
+浏览器访问 `http://localhost:8080`。
+
+### Web UI 功能
+
+| 页面 | 功能 |
+|------|------|
+| **配置向导** | 可视化配置 PG/TiDB 连接信息，一键测试连接 |
+| **任务监控** | 实时查看运行中任务的进度、吞吐量、表级详情 |
+| **迁移历史** | 查看历史迁移任务列表和详情 |
+| **报告下载** | 下载 JSON 格式迁移报告 |
+
+### Web UI API 端点
+
+```
+GET  /api/v1/health                      # 健康检查
+POST /api/v1/config/test-connection      # 测试数据库连接
+POST /api/v1/tasks                       # 创建迁移任务
+GET  /api/v1/tasks                       # 列出所有任务
+GET  /api/v1/tasks/{id}                  # 获取任务详情
+POST /api/v1/tasks/{id}/start            # 启动任务
+POST /api/v1/tasks/{id}/pause            # 暂停任务
+POST /api/v1/tasks/{id}/resume           # 恢复任务
+POST /api/v1/tasks/{id}/cancel           # 取消任务
+DELETE /api/v1/tasks/{id}                # 删除任务
+GET  /api/v1/tasks/{id}/progress         # 获取实时进度
+GET  /api/v1/tasks/{id}/report           # 获取迁移报告
+GET  /api/v1/ws                          # WebSocket 实时推送
+```
+
+### CLI 监控模式（兼容旧版）
+
+在配置文件中启用 `web.enable: true` 后，CLI 命令执行迁移时也会启动监控面板：
 
 启用后在浏览器访问 `http://<host>:8080` 可查看：
 

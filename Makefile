@@ -30,4 +30,15 @@ fmt:
 clean:
 	rm -rf $(BUILD_DIR) coverage.out coverage.html
 
+web-frontend:
+	@echo "Building frontend..."
+	cd web/frontend && npm ci && npm run build
+	rm -rf cmd/static/assets cmd/static/favicon.svg cmd/static/icons.svg
+	cp -r web/dist/* cmd/static/
+
+build-web: web-frontend
+	@echo "Building $(BINARY_NAME) with embedded web UI..."
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) .
+
 all: fmt vet test build
