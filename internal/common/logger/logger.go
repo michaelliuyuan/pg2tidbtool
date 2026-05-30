@@ -2,10 +2,32 @@ package logger
 
 import (
 	"os"
+	"sync"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
+
+var (
+	extraMu   sync.Mutex
+	extraCore zapcore.Core
+)
+
+func RegisterExtraCore(core zapcore.Core) {
+	extraMu.Lock()
+	defer extraMu.Unlock()
+	if extraCore == nil {
+		extraCore = core
+	} else {
+		extraCore = zapcore.NewTee(extraCore, core)
+	}
+}
+
+func UnregisterExtraCore() {
+	extraMu.Lock()
+	defer extraMu.Unlock()
+	extraCore = nil
+}
 
 func Init(level, format string) error {
 	return InitWithOutput(level, format, "")
@@ -50,6 +72,12 @@ func InitWithOutput(level, format, outputPath string) error {
 			))
 		}
 	}
+
+	extraMu.Lock()
+	if extraCore != nil {
+		cores = append(cores, extraCore)
+	}
+	extraMu.Unlock()
 
 	core := zapcore.NewTee(cores...)
 	logger := zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel))

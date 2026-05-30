@@ -15,7 +15,9 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/pg2tidb/pg2tidb-migrator/internal/common/checkpoint"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/config"
+	"github.com/pg2tidb/pg2tidb-migrator/internal/common/logger"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/orchestrator"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/store"
 	"go.uber.org/zap"
@@ -444,13 +446,22 @@ func (s *Server) runMigration(ctx context.Context, taskID string, cfg config.Con
 	defer func() {
 		logCore.Disable()
 		delete(s.logCores, taskID)
+		logger.UnregisterExtraCore()
 	}()
 
 	s.logCollector.GetBuffer(taskID)
 	s.logCollector.Append(taskID, "INFO", "Migration task started", "")
 
+	logger.RegisterExtraCore(logCore)
+
+	progressCtx, progressCancel := context.WithCancel(ctx)
+	defer progressCancel()
+	go s.pollProgress(progressCtx, taskID, cfg.Migration.CheckpointDir)
+
 	o := orchestrator.NewOrchestrator(cfg)
 	results, err := o.Run(ctx, orchestrator.PipelineConfig{})
+
+	progressCancel()
 
 	if ctx.Err() == context.Canceled {
 		s.logCollector.Append(taskID, "WARN", "Migration task cancelled", "")
@@ -480,6 +491,58 @@ func (s *Server) runMigration(ctx context.Context, taskID string, cfg config.Con
 	} else {
 		s.logCollector.Append(taskID, "WARN", "Migration completed with errors", "")
 		s.store.UpdateTaskStatus(taskID, store.TaskStatusFailed)
+	}
+}
+
+func (s *Server) pollProgress(ctx context.Context, taskID string, checkpointDir string) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cpMgr, err := checkpoint.NewManager(checkpointDir)
+			if err != nil {
+				continue
+			}
+
+			phase := cpMgr.GetPhase()
+			tables := cpMgr.GetAllTables()
+
+			var tablesDone, tablesTotal int
+			var rowsDone, rowsTotal int64
+			for _, tc := range tables {
+				tablesTotal++
+				rowsTotal += tc.RowsTotal
+				rowsDone += tc.RowsDone
+				if tc.State == checkpoint.StateCompleted || tc.State == checkpoint.StateFailed {
+					tablesDone++
+				}
+			}
+
+			var progress float64
+			if rowsTotal > 0 {
+				progress = float64(rowsDone) / float64(rowsTotal)
+				if progress > 1.0 {
+					progress = 1.0
+				}
+			} else if tablesTotal > 0 {
+				progress = float64(tablesDone) / float64(tablesTotal)
+			}
+
+			_ = s.store.UpdateTaskProgress(taskID, phase, progress, tablesDone, tablesTotal, rowsDone, rowsTotal)
+
+			s.BroadcastProgress(taskID, map[string]interface{}{
+				"phase":        phase,
+				"progress":     progress,
+				"tables_done":  tablesDone,
+				"tables_total": tablesTotal,
+				"rows_done":    rowsDone,
+				"rows_total":   rowsTotal,
+			})
+		}
 	}
 }
 
