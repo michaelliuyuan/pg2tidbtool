@@ -50,6 +50,10 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 	}
 	defer m.pgDB.Close()
 
+	m.pgDB.SetMaxOpenConns(opts.Parallel + 2)
+	m.pgDB.SetConnMaxLifetime(10 * time.Minute)
+	m.pgDB.SetConnMaxIdleTime(5 * time.Minute)
+
 	if err := m.pgDB.PingContext(ctx); err != nil {
 		return nil, cerrors.Wrap(cerrors.ErrSourceConnect, "ping PostgreSQL", err)
 	}
@@ -319,6 +323,14 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 	}
 	defer tidbDB.Close()
 
+	tidbDB.SetConnMaxLifetime(5 * time.Minute)
+	tidbDB.SetConnMaxIdleTime(2 * time.Minute)
+	tidbDB.SetMaxOpenConns(4)
+
+	if err := tidbDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping TiDB: %w", err)
+	}
+
 	entries, err := os.ReadDir(opts.TempDir)
 	if err != nil {
 		return err
@@ -355,8 +367,47 @@ func (m *Migrator) loadCSVToTiDB(ctx context.Context, db *sql.DB, table, csvPath
 	query := fmt.Sprintf("LOAD DATA LOCAL INFILE '%s' INTO TABLE %s FIELDS TERMINATED BY '\\t' LINES TERMINATED BY '\\n'",
 		safePath, quoteMySQL(table))
 
-	_, err := db.ExecContext(ctx, query)
-	return err
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+		}
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		err = conn.QueryRowContext(ctx, "SELECT 1").Scan(new(int))
+		if err != nil {
+			conn.Close()
+			lastErr = err
+			continue
+		}
+		_, err = conn.ExecContext(ctx, query)
+		conn.Close()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isBadConnection(err) {
+			return err
+		}
+		logger := zap.L()
+		logger.Warn("bad connection, retrying LOAD DATA", zap.Int("attempt", attempt+1), zap.String("table", table))
+	}
+	return lastErr
+}
+
+func isBadConnection(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "bad connection") ||
+		strings.Contains(msg, "invalid connection") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "EOF")
 }
 
 func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error {
