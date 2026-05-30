@@ -111,7 +111,7 @@ func (o *Orchestrator) Run(ctx context.Context, pipelineCfg PipelineConfig) ([]P
 
 func (o *Orchestrator) runPrecheck(ctx context.Context) PipelineResult {
 	log := zap.L()
-	log.Info("=== Phase: Pre-check ===")
+	log.Info("Phase: 预检查")
 	start := time.Now()
 
 	rpt, err := o.prechecker.Run(ctx, common.PrecheckOpts{
@@ -140,7 +140,7 @@ func (o *Orchestrator) runPrecheck(ctx context.Context) PipelineResult {
 
 func (o *Orchestrator) runSchema(ctx context.Context) PipelineResult {
 	log := zap.L()
-	log.Info("=== Phase: Schema Migration ===")
+	log.Info("Phase: Schema 迁移")
 	start := time.Now()
 
 	err := o.schemaMig.Run(ctx, common.SchemaOpts{})
@@ -166,7 +166,7 @@ func (o *Orchestrator) runSchema(ctx context.Context) PipelineResult {
 
 func (o *Orchestrator) runData(ctx context.Context) PipelineResult {
 	log := zap.L()
-	log.Info("=== Phase: Data Migration ===")
+	log.Info("Phase: 数据迁移")
 	start := time.Now()
 
 	dataResult, err := o.dataMig.Run(ctx, common.DataOpts{
@@ -201,7 +201,7 @@ func (o *Orchestrator) runData(ctx context.Context) PipelineResult {
 
 func (o *Orchestrator) runValidate(ctx context.Context) PipelineResult {
 	log := zap.L()
-	log.Info("=== Phase: Data Validation ===")
+	log.Info("Phase: 数据验证")
 	start := time.Now()
 
 	rpt, err := o.validator.Run(ctx, common.ValidateOpts{

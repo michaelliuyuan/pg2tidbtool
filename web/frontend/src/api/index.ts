@@ -40,6 +40,7 @@ export interface PhaseInfo {
   tables_done: number
   rows_total: number
   rows_done: number
+  logs?: { level: string; message: string; timestamp: string }[]
 }
 
 export interface TaskPhasesResponse {

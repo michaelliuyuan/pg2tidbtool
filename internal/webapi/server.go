@@ -512,6 +512,9 @@ func (s *Server) pollProgress(ctx context.Context, taskID string, checkpointDir 
 			}
 
 			phase := cpMgr.GetPhase()
+			if phase == "data-migration" {
+				phase = "data"
+			}
 			tables := cpMgr.GetAllTables()
 
 			var tablesDone, tablesTotal int
@@ -775,14 +778,15 @@ func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type PhaseInfo struct {
-		Name        string                 `json:"name"`
-		Label       string                 `json:"label"`
-		Status      string                 `json:"status"`
+		Name        string                   `json:"name"`
+		Label       string                   `json:"label"`
+		Status      string                   `json:"status"`
 		Tables      []map[string]interface{} `json:"tables,omitempty"`
-		TableCount  int                    `json:"table_count"`
-		TablesDone  int                    `json:"tables_done"`
-		RowsTotal   int64                  `json:"rows_total"`
-		RowsDone    int64                  `json:"rows_done"`
+		TableCount  int                      `json:"table_count"`
+		TablesDone  int                      `json:"tables_done"`
+		RowsTotal   int64                    `json:"rows_total"`
+		RowsDone    int64                    `json:"rows_done"`
+		Logs        []map[string]interface{} `json:"logs,omitempty"`
 	}
 
 	phaseNames := []struct{ name, label string }{
@@ -821,7 +825,7 @@ func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if p.name == "data" || p.name == "schema" {
+		if p.name == "data" || p.name == "schema" || p.name == "precheck" || p.name == "validate" {
 			cpMgr, cpErr := checkpoint.NewManager(fmt.Sprintf(".checkpoint/%s", taskID))
 			if cpErr == nil {
 				tables := cpMgr.GetAllTables()
@@ -841,6 +845,33 @@ func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
 							pi.TablesDone++
 						}
 					}
+				}
+			}
+
+			logs := s.logCollector.GetBuffer(taskID).GetAll()
+			phaseLabel := p.label
+			inPhase := false
+			for _, entry := range logs {
+				if strings.Contains(entry.Message, "Phase: "+phaseLabel) {
+					inPhase = true
+					continue
+				}
+				if inPhase {
+					nextPhaseIdx := -1
+					for _, pp := range phaseNames {
+						if pp.label != phaseLabel && strings.Contains(entry.Message, "Phase: "+pp.label) {
+							nextPhaseIdx = 1
+							break
+						}
+					}
+					if nextPhaseIdx >= 0 || strings.Contains(entry.Message, "Migration task started") || strings.Contains(entry.Message, "migration pipeline completed") {
+						break
+					}
+					pi.Logs = append(pi.Logs, map[string]interface{}{
+						"level":     entry.Level,
+						"message":   entry.Message,
+						"timestamp": entry.Timestamp,
+					})
 				}
 			}
 		}

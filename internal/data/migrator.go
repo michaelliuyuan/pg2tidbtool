@@ -626,6 +626,9 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 			logger.Info("table row count", zap.String("table", table), zap.Int64("rows", rowCount))
 		}
 
+		m.cpMgr.GetOrCreateTable(table, rowCount)
+		m.cpMgr.MarkTableRunning(table)
+
 		selectQuery := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
 		rows, err := m.pgDB.QueryContext(ctx, selectQuery)
 		if err != nil {
@@ -684,6 +687,7 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 					continue
 				}
 				totalRows += len(batch)
+				m.cpMgr.UpdateTableProgress(table, int64(totalRows), 0)
 				logger.Info("batch inserted", zap.String("table", table), zap.Int("rows_in_batch", totalRows), zap.Int64("total", rowCount))
 				batch = batch[:0]
 			}
@@ -701,6 +705,7 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 			}
 		}
 
+		m.cpMgr.MarkTableCompleted(table, int64(totalRows))
 		logger.Info("table import completed", zap.String("table", table), zap.Int("rows", totalRows))
 	}
 

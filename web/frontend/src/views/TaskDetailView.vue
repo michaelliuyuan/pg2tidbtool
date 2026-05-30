@@ -399,8 +399,15 @@ function logLevelClass(level: string): string {
                   </el-table-column>
                 </el-table>
               </div>
-              <div v-if="phaseLogs[phase.name]?.length === 0" style="color: #909399; text-align: center; padding: 20px;">
+              <div v-if="phase.logs?.length === 0 && phaseLogs[phase.name]?.length === 0" style="color: #909399; text-align: center; padding: 20px;">
                 暂无日志
+              </div>
+              <div v-else-if="phase.logs?.length" class="phase-log-container">
+                <div v-for="(entry, idx) in phase.logs" :key="idx" class="log-line" :class="'log-' + entry.level.toLowerCase()">
+                  <span class="log-time">{{ entry.timestamp ? entry.timestamp.replace('T', ' ').substring(11, 19) : '' }}</span>
+                  <span class="log-level">[{{ entry.level }}]</span>
+                  <span class="log-msg">{{ entry.message }}</span>
+                </div>
               </div>
               <div v-else class="phase-log-container">
                 <div v-for="(entry, idx) in phaseLogs[phase.name]" :key="idx" class="log-line" :class="logLevelClass(entry.level)">
