@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, type FormRules } from 'element-plus'
 import apiClient from '../api'
@@ -43,6 +43,72 @@ const sourceTestResult = ref<any>(null)
 const targetTestResult = ref<any>(null)
 const testingSource = ref(false)
 const testingTarget = ref(false)
+
+const savedConnections = ref<Array<{ name: string; source: any; target: any }>>([])
+const saveConnName = ref('')
+const saveConnDialogVisible = ref(false)
+const loadConnDialogVisible = ref(false)
+
+const STORAGE_KEY = 'pg2tidb_saved_connections'
+
+function loadSavedConnections() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (raw) {
+      savedConnections.value = JSON.parse(raw)
+    }
+  } catch {}
+}
+
+function saveConnectionsToStorage() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(savedConnections.value))
+}
+
+function saveCurrentConnection() {
+  if (!saveConnName.value.trim()) {
+    ElMessage.warning('请输入连接配置名称')
+    return
+  }
+  const idx = savedConnections.value.findIndex(c => c.name === saveConnName.value.trim())
+  const entry = {
+    name: saveConnName.value.trim(),
+    source: { ...form.source },
+    target: { ...form.target },
+  }
+  if (idx >= 0) {
+    savedConnections.value[idx] = entry
+  } else {
+    savedConnections.value.push(entry)
+  }
+  saveConnectionsToStorage()
+  saveConnDialogVisible.value = false
+  saveConnName.value = ''
+  ElMessage.success('连接配置已保存')
+}
+
+function loadConnection(conn: { source: any; target: any }) {
+  Object.assign(form.source, conn.source)
+  Object.assign(form.target, conn.target)
+  loadConnDialogVisible.value = false
+  ElMessage.success('连接配置已加载')
+}
+
+function deleteConnection(idx: number) {
+  savedConnections.value.splice(idx, 1)
+  saveConnectionsToStorage()
+}
+
+onMounted(() => {
+  loadSavedConnections()
+  const last = localStorage.getItem('pg2tidb_last_connection')
+  if (last) {
+    try {
+      const c = JSON.parse(last)
+      if (c.source) Object.assign(form.source, c.source)
+      if (c.target) Object.assign(form.target, c.target)
+    } catch {}
+  }
+})
 
 const rules: FormRules = {
   'source.host': [{ required: true, message: '请输入源数据库地址', trigger: 'blur' }],
@@ -92,6 +158,8 @@ async function testConnection(type: 'source' | 'target') {
 async function submit() {
   loading.value = true
   try {
+    localStorage.setItem('pg2tidb_last_connection', JSON.stringify({ source: form.source, target: form.target }))
+
     const { data } = await apiClient.createTask({
       name: form.name || `Migration ${new Date().toLocaleString()}`,
       source: { ...form.source },
@@ -130,9 +198,19 @@ function prevStep() {
   <div style="max-width: 900px; margin: 0 auto;">
     <el-card>
       <template #header>
-        <div style="display: flex; align-items: center;">
-          <el-icon size="24" style="margin-right: 8px;"><Connection /></el-icon>
-          <span style="font-size: 18px; font-weight: bold;">新建迁移任务</span>
+        <div style="display: flex; align-items: center; justify-content: space-between;">
+          <div style="display: flex; align-items: center;">
+            <el-icon size="24" style="margin-right: 8px;"><Connection /></el-icon>
+            <span style="font-size: 18px; font-weight: bold;">新建迁移任务</span>
+          </div>
+          <el-space>
+            <el-button size="small" @click="loadConnDialogVisible = true">
+              <el-icon><FolderOpened /></el-icon> 加载连接
+            </el-button>
+            <el-button size="small" @click="saveConnDialogVisible = true">
+              <el-icon><FolderAdd /></el-icon> 保存连接
+            </el-button>
+          </el-space>
         </div>
       </template>
 
@@ -271,5 +349,36 @@ function prevStep() {
         </el-form-item>
       </el-form>
     </el-card>
+
+    <!-- Save Connection Dialog -->
+    <el-dialog v-model="saveConnDialogVisible" title="保存连接配置" width="400px">
+      <el-input v-model="saveConnName" placeholder="输入配置名称（如：生产环境）" />
+      <template #footer>
+        <el-button @click="saveConnDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveCurrentConnection">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- Load Connection Dialog -->
+    <el-dialog v-model="loadConnDialogVisible" title="加载连接配置" width="500px">
+      <div v-if="savedConnections.length === 0" style="color: #999; text-align: center; padding: 20px;">
+        暂无保存的连接配置
+      </div>
+      <div v-for="(conn, idx) in savedConnections" :key="idx" style="border: 1px solid #ebeef5; border-radius: 8px; padding: 12px; margin-bottom: 10px;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <strong>{{ conn.name }}</strong>
+            <div style="color: #909399; font-size: 12px; margin-top: 4px;">
+              PG: {{ conn.source.host }}:{{ conn.source.port }}/{{ conn.source.database }}
+              → TiDB: {{ conn.target.host }}:{{ conn.target.port }}/{{ conn.target.database }}
+            </div>
+          </div>
+          <el-space>
+            <el-button size="small" type="primary" @click="loadConnection(conn)">加载</el-button>
+            <el-button size="small" type="danger" plain @click="deleteConnection(idx)">删除</el-button>
+          </el-space>
+        </div>
+      </div>
+    </el-dialog>
   </div>
 </template>

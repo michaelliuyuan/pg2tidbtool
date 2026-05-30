@@ -19,6 +19,9 @@ const logsLoading = ref(false)
 const logAutoScroll = ref(true)
 const logWs = ref<WebSocket | null>(null)
 const logContainer = ref<HTMLElement | null>(null)
+const logPhaseFilter = ref('all')
+
+const activePhaseTab = ref('overview')
 
 const statusMap: Record<string, { type: string; label: string }> = {
   created: { type: 'info', label: '已创建' },
@@ -36,6 +39,8 @@ const phaseMap: Record<string, string> = {
   validate: '数据验证',
   completed: '已完成',
 }
+
+const phases = ['precheck', 'schema', 'data', 'validate']
 
 const statusInfo = computed(() => {
   if (!task.value) return { type: 'info', label: '-' }
@@ -65,6 +70,76 @@ const rowsPerSec = computed(() => {
   const secs = (end.getTime() - start.getTime()) / 1000
   if (secs <= 0) return 0
   return Math.round(task.value.rows_done / secs)
+})
+
+const currentPhaseIndex = computed(() => {
+  if (!task.value) return -1
+  return phases.indexOf(task.value.phase)
+})
+
+function phaseStatus(phase: string): string {
+  if (!task.value) return 'pending'
+  const idx = phases.indexOf(phase)
+  const curIdx = currentPhaseIndex.value
+  if (task.value.status === 'completed') return 'completed'
+  if (task.value.status === 'failed' && idx === curIdx) return 'failed'
+  if (idx < curIdx) return 'completed'
+  if (idx === curIdx) return task.value.status === 'running' ? 'running' : 'running'
+  return 'pending'
+}
+
+function phaseStatusIcon(phase: string): string {
+  const s = phaseStatus(phase)
+  switch (s) {
+    case 'completed': return '✅'
+    case 'running': return '⏳'
+    case 'failed': return '❌'
+    default: return '⬜'
+  }
+}
+
+const filteredLogs = computed(() => {
+  if (logPhaseFilter.value === 'all') return logs.value
+  const phaseLabel = `Phase: ${phaseMap[logPhaseFilter.value] || logPhaseFilter.value}`
+  const phaseLabelLower = phaseLabel.toLowerCase()
+  let inPhase = false
+  const result: TaskLogEntry[] = []
+  for (const entry of logs.value) {
+    if (entry.message.toLowerCase().includes(phaseLabelLower)) {
+      inPhase = true
+      result.push(entry)
+      continue
+    }
+    if (inPhase && entry.message.includes('Phase:')) {
+      inPhase = false
+      continue
+    }
+    if (inPhase) result.push(entry)
+  }
+  return result
+})
+
+const phaseLogs = computed(() => {
+  const result: Record<string, TaskLogEntry[]> = {}
+  for (const phase of phases) {
+    const phaseLabel = `Phase: ${phaseMap[phase]}`
+    let inPhase = false
+    const entries: TaskLogEntry[] = []
+    for (const entry of logs.value) {
+      if (entry.message.includes(phaseLabel)) {
+        inPhase = true
+        entries.push(entry)
+        continue
+      }
+      if (inPhase && entry.message.includes('Phase:')) {
+        inPhase = false
+        continue
+      }
+      if (inPhase) entries.push(entry)
+    }
+    result[phase] = entries
+  }
+  return result
 })
 
 async function fetchTask() {
@@ -104,6 +179,7 @@ onMounted(() => {
   fetchTask()
   connectWS()
   pollTimer = setInterval(fetchTask, 5000)
+  loadLogs()
 })
 
 onUnmounted(() => {
@@ -153,29 +229,28 @@ async function downloadReport() {
   URL.revokeObjectURL(url)
 }
 
-async function openLogs() {
-  logDrawerVisible.value = true
+async function loadLogs() {
   logsLoading.value = true
-  logs.value = []
   try {
     const { data } = await apiClient.getTaskLogs(taskId)
     logs.value = data.logs || []
   } catch {
-    ElMessage.error('获取日志失败')
   } finally {
     logsLoading.value = false
   }
-  await nextTick()
-  scrollToBottom()
   connectLogWS()
+}
+
+function openLogs() {
+  logDrawerVisible.value = true
+  if (logs.value.length === 0) {
+    loadLogs()
+  }
+  nextTick(() => scrollToBottom())
 }
 
 function closeLogs() {
   logDrawerVisible.value = false
-  if (logWs.value) {
-    logWs.value.close()
-    logWs.value = null
-  }
 }
 
 function connectLogWS() {
@@ -188,7 +263,7 @@ function connectLogWS() {
     try {
       const entry: TaskLogEntry = JSON.parse(event.data)
       logs.value.push(entry)
-      if (logAutoScroll.value) {
+      if (logAutoScroll.value && logDrawerVisible.value) {
         nextTick(() => scrollToBottom())
       }
     } catch {}
@@ -273,6 +348,63 @@ function logLevelClass(level: string): string {
         </el-space>
       </el-card>
 
+      <!-- Phase Timeline -->
+      <el-card style="margin-bottom: 20px;">
+        <template #header>迁移阶段</template>
+        <el-tabs v-model="activePhaseTab">
+          <el-tab-pane label="阶段概览" name="overview">
+            <el-timeline>
+              <el-timeline-item
+                v-for="phase in phases"
+                :key="phase"
+                :type="phaseStatus(phase) === 'completed' ? 'success' : phaseStatus(phase) === 'running' ? 'primary' : phaseStatus(phase) === 'failed' ? 'danger' : 'info'"
+                :hollow="phaseStatus(phase) === 'pending'"
+                :timestamp="phaseMap[phase]"
+                placement="top"
+              >
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <span>{{ phaseStatusIcon(phase) }}</span>
+                  <el-tag :type="phaseStatus(phase) === 'completed' ? 'success' : phaseStatus(phase) === 'running' ? '' : phaseStatus(phase) === 'failed' ? 'danger' : 'info'" size="small">
+                    {{ phaseStatus(phase) === 'completed' ? '已完成' : phaseStatus(phase) === 'running' ? '进行中' : phaseStatus(phase) === 'failed' ? '失败' : '等待中' }}
+                  </el-tag>
+                </div>
+                <div v-if="phase === task.phase && phase === 'data'" style="margin-top: 8px; color: #606266; font-size: 13px;">
+                  表: {{ task.tables_done }}/{{ task.tables_total }} · 行: {{ task.rows_done.toLocaleString() }}/{{ task.rows_total.toLocaleString() }}
+                </div>
+                <div v-if="phaseLogs[phase]?.length" style="margin-top: 8px;">
+                  <el-tag
+                    size="small"
+                    type="info"
+                    style="cursor: pointer;"
+                    @click="logPhaseFilter = phase; logDrawerVisible = true"
+                  >
+                    {{ phaseLogs[phase].length }} 条日志 - 点击查看
+                  </el-tag>
+                </div>
+              </el-timeline-item>
+            </el-timeline>
+          </el-tab-pane>
+
+          <el-tab-pane
+            v-for="phase in phases"
+            :key="phase"
+            :label="phaseMap[phase]"
+            :name="phase"
+          >
+            <div v-if="phaseLogs[phase]?.length === 0" style="color: #909399; text-align: center; padding: 30px;">
+              {{ phaseStatus(phase) === 'pending' ? '该阶段尚未开始' : '暂无日志' }}
+            </div>
+            <div v-else class="phase-log-container">
+              <div v-for="(entry, idx) in phaseLogs[phase]" :key="idx" class="log-line" :class="logLevelClass(entry.level)">
+                <span class="log-time">{{ entry.timestamp ? entry.timestamp.replace('T', ' ').substring(11, 19) : '' }}</span>
+                <span class="log-level">[{{ entry.level }}]</span>
+                <span class="log-msg">{{ entry.message }}</span>
+              </div>
+            </div>
+          </el-tab-pane>
+        </el-tabs>
+      </el-card>
+
       <!-- Error -->
       <el-card v-if="task.error" style="margin-bottom: 20px;">
         <el-alert :title="task.error" type="error" :closable="false" show-icon />
@@ -294,13 +426,19 @@ function logLevelClass(level: string): string {
     <el-drawer v-model="logDrawerVisible" title="任务日志" size="60%" :before-close="closeLogs" direction="rtl">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
         <el-checkbox v-model="logAutoScroll">自动滚动</el-checkbox>
-        <el-button size="small" @click="() => { logs = []; connectLogWS() }">清空并重新加载</el-button>
+        <el-select v-model="logPhaseFilter" size="small" style="width: 160px;">
+          <el-option label="全部日志" value="all" />
+          <el-option label="预检查" value="precheck" />
+          <el-option label="Schema 迁移" value="schema" />
+          <el-option label="数据迁移" value="data" />
+          <el-option label="数据验证" value="validate" />
+        </el-select>
       </div>
       <div ref="logContainer" v-loading="logsLoading" class="log-container">
-        <div v-if="logs.length === 0 && !logsLoading" style="color: #999; text-align: center; padding: 40px;">
+        <div v-if="filteredLogs.length === 0 && !logsLoading" style="color: #999; text-align: center; padding: 40px;">
           暂无日志
         </div>
-        <div v-for="(log, idx) in logs" :key="idx" class="log-line" :class="logLevelClass(log.level)">
+        <div v-for="(log, idx) in filteredLogs" :key="idx" class="log-line" :class="logLevelClass(log.level)">
           <span class="log-time">{{ log.timestamp ? log.timestamp.replace('T', ' ').substring(0, 19) : '' }}</span>
           <span class="log-level">[{{ log.level }}]</span>
           <span class="log-msg">{{ log.message }}</span>
@@ -320,7 +458,19 @@ function logLevelClass(level: string): string {
   line-height: 1.6;
   padding: 12px;
   border-radius: 6px;
-  height: calc(100vh - 180px);
+  height: calc(100vh - 240px);
+  overflow-y: auto;
+}
+
+.phase-log-container {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 12px;
+  border-radius: 6px;
+  max-height: 400px;
   overflow-y: auto;
 }
 
