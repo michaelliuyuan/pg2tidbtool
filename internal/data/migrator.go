@@ -766,19 +766,21 @@ func convertSQLValue(val interface{}) interface{} {
 	}
 	switch v := val.(type) {
 	case []byte:
-		s := string(v)
-		if json.Valid([]byte(s)) {
-			return s
-		}
-		if isPGArray(s) {
-			return pgArrayToJSON(s)
-		}
-		return s
+		return tryConvertArray(string(v))
+	case string:
+		return tryConvertArray(v)
 	case time.Time:
 		return v.Format("2006-01-02 15:04:05.999999")
 	default:
 		return v
 	}
+}
+
+func tryConvertArray(s string) interface{} {
+	if isPGArray(s) {
+		return pgArrayToJSON(s)
+	}
+	return s
 }
 
 func isPGArray(s string) bool {
@@ -794,17 +796,64 @@ func pgArrayToJSON(s string) string {
 		return "[]"
 	}
 
+	elements := splitPGArrayElements(inner)
+	parts := make([]string, 0, len(elements))
+	for _, elem := range elements {
+		elem = strings.TrimSpace(elem)
+		if elem == "" {
+			parts = append(parts, "null")
+		} else if elem == "NULL" || elem == "null" {
+			parts = append(parts, "null")
+		} else if elem == "t" {
+			parts = append(parts, "true")
+		} else if elem == "f" {
+			parts = append(parts, "false")
+		} else if len(elem) >= 2 && elem[0] == '"' && elem[len(elem)-1] == '"' {
+			unquoted := elem[1 : len(elem)-1]
+			unquoted = strings.ReplaceAll(unquoted, `\"`, `"`)
+			unquoted = strings.ReplaceAll(unquoted, `\\`, `\`)
+			b, _ := json.Marshal(unquoted)
+			parts = append(parts, string(b))
+		} else if elem[0] == '{' {
+			parts = append(parts, pgArrayToJSON(elem))
+		} else {
+			if _, err := strconv.ParseFloat(elem, 64); err == nil {
+				parts = append(parts, elem)
+			} else {
+				b, _ := json.Marshal(elem)
+				parts = append(parts, string(b))
+			}
+		}
+	}
+
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+func splitPGArrayElements(s string) []string {
 	var elements []string
 	current := ""
 	inQuote := false
+	escape := false
 	depth := 0
 
-	for i := 0; i < len(inner); i++ {
-		ch := inner[i]
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if escape {
+			current += string(ch)
+			escape = false
+			continue
+		}
+		if ch == '\\' {
+			escape = true
+			current += string(ch)
+			continue
+		}
 		if ch == '"' {
 			inQuote = !inQuote
 			current += string(ch)
-		} else if ch == '{' && !inQuote {
+			continue
+		}
+		if ch == '{' && !inQuote {
 			depth++
 			current += string(ch)
 		} else if ch == '}' && !inQuote {
@@ -820,36 +869,7 @@ func pgArrayToJSON(s string) string {
 	if current != "" || len(elements) > 0 {
 		elements = append(elements, current)
 	}
-
-	parts := make([]string, 0, len(elements))
-	for _, elem := range elements {
-		elem = strings.TrimSpace(elem)
-		if elem == "" {
-			parts = append(parts, `""`)
-		} else if elem == "NULL" || elem == "null" {
-			parts = append(parts, "null")
-		} else if elem[0] == '"' {
-			escaped := strings.ReplaceAll(elem, `\`, `\\`)
-			escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-			parts = append(parts, `"`+escaped[1:len(escaped)-1]+`"`)
-		} else if elem[0] == '{' {
-			parts = append(parts, pgArrayToJSON(elem))
-		} else if elem == "t" {
-			parts = append(parts, "true")
-		} else if elem == "f" {
-			parts = append(parts, "false")
-		} else {
-			if _, err := strconv.ParseFloat(elem, 64); err == nil {
-				parts = append(parts, elem)
-			} else {
-				escaped := strings.ReplaceAll(elem, `\`, `\\`)
-				escaped = strings.ReplaceAll(escaped, `"`, `\"`)
-				parts = append(parts, `"`+escaped+`"`)
-			}
-		}
-	}
-
-	return "[" + strings.Join(parts, ",") + "]"
+	return elements
 }
 
 func convertValue(val interface{}) string {
