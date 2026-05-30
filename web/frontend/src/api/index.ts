@@ -24,6 +24,30 @@ export interface Task {
   updated_at: string
 }
 
+export interface PhaseTableInfo {
+  name: string
+  state: string
+  rows_done: number
+  rows_total: number
+}
+
+export interface PhaseInfo {
+  name: string
+  label: string
+  status: string
+  tables: PhaseTableInfo[]
+  table_count: number
+  tables_done: number
+  rows_total: number
+  rows_done: number
+}
+
+export interface TaskPhasesResponse {
+  task_id: string
+  phase: string
+  phases: PhaseInfo[]
+}
+
 export interface TaskLogEntry {
   timestamp: string
   level: string
@@ -128,6 +152,9 @@ export const apiClient = {
 
   getTaskLogs: (id: string) =>
     api.get<TaskLogsResponse>(`/tasks/${id}/logs`),
+
+  getTaskPhases: (id: string) =>
+    api.get<TaskPhasesResponse>(`/tasks/${id}/phases`),
 }
 
 export default apiClient

@@ -27,7 +27,13 @@ func (c *TaskLogCore) Enable()  { c.enabled.Store(true) }
 func (c *TaskLogCore) Disable() { c.enabled.Store(false) }
 
 func (c *TaskLogCore) Enabled(level zapcore.Level) bool {
-	return c.enabled.Load() && (c.next != nil && c.next.Enabled(level))
+	if !c.enabled.Load() {
+		return false
+	}
+	if c.next != nil {
+		return c.next.Enabled(level)
+	}
+	return true
 }
 
 func (c *TaskLogCore) With(fields []zapcore.Field) zapcore.Core {

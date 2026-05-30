@@ -115,6 +115,7 @@ func NewServer(store *store.Store, host string, port int, dataDir string, static
 			r.Get("/progress", s.handleTaskProgress)
 			r.Get("/report", s.handleTaskReport)
 			r.Get("/logs", s.handleTaskLogs)
+			r.Get("/phases", s.handleTaskPhases)
 		})
 		r.Get("/ws", s.handleWebSocket)
 	})
@@ -757,4 +758,97 @@ func (s *Server) handleLogStream(w http.ResponseWriter, r *http.Request, taskID 
 			return
 		}
 	}
+}
+
+func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
+	taskID := chi.URLParam(r, "taskID")
+	task, err := s.store.GetTask(taskID)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if task == nil {
+		s.writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+
+	type PhaseInfo struct {
+		Name        string                 `json:"name"`
+		Label       string                 `json:"label"`
+		Status      string                 `json:"status"`
+		Tables      []map[string]interface{} `json:"tables,omitempty"`
+		TableCount  int                    `json:"table_count"`
+		TablesDone  int                    `json:"tables_done"`
+		RowsTotal   int64                  `json:"rows_total"`
+		RowsDone    int64                  `json:"rows_done"`
+	}
+
+	phaseNames := []struct{ name, label string }{
+		{"precheck", "预检查"},
+		{"schema", "Schema 迁移"},
+		{"data", "数据迁移"},
+		{"validate", "数据验证"},
+	}
+
+	var phases []PhaseInfo
+	for i, p := range phaseNames {
+		pi := PhaseInfo{
+			Name:   p.name,
+			Label:  p.label,
+			Status: "pending",
+		}
+
+		if task.Status == "completed" {
+			pi.Status = "completed"
+		} else if task.Phase == p.name {
+			if task.Status == "running" {
+				pi.Status = "running"
+			} else if task.Status == "failed" {
+				pi.Status = "failed"
+			}
+		} else if task.Phase != "" {
+			curIdx := -1
+			for j, pp := range phaseNames {
+				if pp.name == task.Phase {
+					curIdx = j
+					break
+				}
+			}
+			if curIdx >= 0 && i < curIdx {
+				pi.Status = "completed"
+			}
+		}
+
+		if p.name == "data" || p.name == "schema" {
+			cpMgr, cpErr := checkpoint.NewManager(fmt.Sprintf(".checkpoint/%s", taskID))
+			if cpErr == nil {
+				tables := cpMgr.GetAllTables()
+				if len(tables) > 0 {
+					for _, tc := range tables {
+						tableInfo := map[string]interface{}{
+							"name":       tc.TableName,
+							"state":      string(tc.State),
+							"rows_done":  tc.RowsDone,
+							"rows_total": tc.RowsTotal,
+						}
+						pi.Tables = append(pi.Tables, tableInfo)
+						pi.TableCount++
+						pi.RowsTotal += tc.RowsTotal
+						pi.RowsDone += tc.RowsDone
+						if tc.State == checkpoint.StateCompleted || tc.State == checkpoint.StateFailed {
+							pi.TablesDone++
+						}
+					}
+				}
+			}
+		}
+
+		phases = append(phases, pi)
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"task_id": taskID,
+		"phase":   task.Phase,
+		"phases":  phases,
+	})
 }

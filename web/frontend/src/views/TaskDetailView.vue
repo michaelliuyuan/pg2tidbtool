@@ -3,7 +3,7 @@ import { ref, onMounted, onUnmounted, computed, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import apiClient from '../api'
-import type { Task, TaskLogEntry } from '../api'
+import type { Task, TaskLogEntry, PhaseInfo } from '../api'
 
 const route = useRoute()
 const router = useRouter()
@@ -22,6 +22,14 @@ const logContainer = ref<HTMLElement | null>(null)
 const logPhaseFilter = ref('all')
 
 const activePhaseTab = ref('overview')
+const phaseData = ref<PhaseInfo[]>([])
+
+async function fetchPhases() {
+  try {
+    const { data } = await apiClient.getTaskPhases(taskId)
+    phaseData.value = data.phases || []
+  } catch {}
+}
 
 const statusMap: Record<string, { type: string; label: string }> = {
   created: { type: 'info', label: '已创建' },
@@ -71,32 +79,6 @@ const rowsPerSec = computed(() => {
   if (secs <= 0) return 0
   return Math.round(task.value.rows_done / secs)
 })
-
-const currentPhaseIndex = computed(() => {
-  if (!task.value) return -1
-  return phases.indexOf(task.value.phase)
-})
-
-function phaseStatus(phase: string): string {
-  if (!task.value) return 'pending'
-  const idx = phases.indexOf(phase)
-  const curIdx = currentPhaseIndex.value
-  if (task.value.status === 'completed') return 'completed'
-  if (task.value.status === 'failed' && idx === curIdx) return 'failed'
-  if (idx < curIdx) return 'completed'
-  if (idx === curIdx) return task.value.status === 'running' ? 'running' : 'running'
-  return 'pending'
-}
-
-function phaseStatusIcon(phase: string): string {
-  const s = phaseStatus(phase)
-  switch (s) {
-    case 'completed': return '✅'
-    case 'running': return '⏳'
-    case 'failed': return '❌'
-    default: return '⬜'
-  }
-}
 
 const filteredLogs = computed(() => {
   if (logPhaseFilter.value === 'all') return logs.value
@@ -178,8 +160,12 @@ let pollTimer: any = null
 onMounted(() => {
   fetchTask()
   connectWS()
-  pollTimer = setInterval(fetchTask, 5000)
+  pollTimer = setInterval(() => {
+    fetchTask()
+    fetchPhases()
+  }, 5000)
   loadLogs()
+  fetchPhases()
 })
 
 onUnmounted(() => {
@@ -355,30 +341,26 @@ function logLevelClass(level: string): string {
           <el-tab-pane label="阶段概览" name="overview">
             <el-timeline>
               <el-timeline-item
-                v-for="phase in phases"
-                :key="phase"
-                :type="phaseStatus(phase) === 'completed' ? 'success' : phaseStatus(phase) === 'running' ? 'primary' : phaseStatus(phase) === 'failed' ? 'danger' : 'info'"
-                :hollow="phaseStatus(phase) === 'pending'"
-                :timestamp="phaseMap[phase]"
+                v-for="phase in phaseData"
+                :key="phase.name"
+                :type="phase.status === 'completed' ? 'success' : phase.status === 'running' ? 'primary' : phase.status === 'failed' ? 'danger' : 'info'"
+                :hollow="phase.status === 'pending'"
+                :timestamp="phase.label"
                 placement="top"
               >
                 <div style="display: flex; align-items: center; gap: 8px;">
-                  <span>{{ phaseStatusIcon(phase) }}</span>
-                  <el-tag :type="phaseStatus(phase) === 'completed' ? 'success' : phaseStatus(phase) === 'running' ? '' : phaseStatus(phase) === 'failed' ? 'danger' : 'info'" size="small">
-                    {{ phaseStatus(phase) === 'completed' ? '已完成' : phaseStatus(phase) === 'running' ? '进行中' : phaseStatus(phase) === 'failed' ? '失败' : '等待中' }}
+                  <span>{{ phase.status === 'completed' ? '✅' : phase.status === 'running' ? '⏳' : phase.status === 'failed' ? '❌' : '⬜' }}</span>
+                  <el-tag :type="phase.status === 'completed' ? 'success' : phase.status === 'running' ? '' : phase.status === 'failed' ? 'danger' : 'info'" size="small">
+                    {{ phase.status === 'completed' ? '已完成' : phase.status === 'running' ? '进行中' : phase.status === 'failed' ? '失败' : '等待中' }}
                   </el-tag>
                 </div>
-                <div v-if="phase === task.phase && phase === 'data'" style="margin-top: 8px; color: #606266; font-size: 13px;">
-                  表: {{ task.tables_done }}/{{ task.tables_total }} · 行: {{ task.rows_done.toLocaleString() }}/{{ task.rows_total.toLocaleString() }}
+                <div v-if="phase.table_count > 0" style="margin-top: 8px; color: #606266; font-size: 13px;">
+                  表: {{ phase.tables_done }}/{{ phase.table_count }} · 行: {{ phase.rows_done.toLocaleString() }}/{{ phase.rows_total.toLocaleString() }}
+                  <el-progress :percentage="phase.rows_total > 0 ? Math.round(phase.rows_done / phase.rows_total * 100) : 0" :stroke-width="6" style="margin-top: 4px;" />
                 </div>
-                <div v-if="phaseLogs[phase]?.length" style="margin-top: 8px;">
-                  <el-tag
-                    size="small"
-                    type="info"
-                    style="cursor: pointer;"
-                    @click="logPhaseFilter = phase; logDrawerVisible = true"
-                  >
-                    {{ phaseLogs[phase].length }} 条日志 - 点击查看
+                <div v-if="phaseLogs[phase.name]?.length" style="margin-top: 8px;">
+                  <el-tag size="small" type="info" style="cursor: pointer;" @click="logPhaseFilter = phase.name; logDrawerVisible = true">
+                    {{ phaseLogs[phase.name].length }} 条日志 - 点击查看
                   </el-tag>
                 </div>
               </el-timeline-item>
@@ -386,21 +368,48 @@ function logLevelClass(level: string): string {
           </el-tab-pane>
 
           <el-tab-pane
-            v-for="phase in phases"
-            :key="phase"
-            :label="phaseMap[phase]"
-            :name="phase"
+            v-for="phase in phaseData"
+            :key="phase.name"
+            :label="phase.label"
+            :name="phase.name"
           >
-            <div v-if="phaseLogs[phase]?.length === 0" style="color: #909399; text-align: center; padding: 30px;">
-              {{ phaseStatus(phase) === 'pending' ? '该阶段尚未开始' : '暂无日志' }}
+            <div v-if="phase.status === 'pending'" style="color: #909399; text-align: center; padding: 30px;">
+              该阶段尚未开始
             </div>
-            <div v-else class="phase-log-container">
-              <div v-for="(entry, idx) in phaseLogs[phase]" :key="idx" class="log-line" :class="logLevelClass(entry.level)">
-                <span class="log-time">{{ entry.timestamp ? entry.timestamp.replace('T', ' ').substring(11, 19) : '' }}</span>
-                <span class="log-level">[{{ entry.level }}]</span>
-                <span class="log-msg">{{ entry.message }}</span>
+            <template v-else>
+              <div v-if="phase.table_count > 0" style="margin-bottom: 16px;">
+                <el-descriptions :column="3" border size="small">
+                  <el-descriptions-item label="表总数">{{ phase.table_count }}</el-descriptions-item>
+                  <el-descriptions-item label="已完成">{{ phase.tables_done }}</el-descriptions-item>
+                  <el-descriptions-item label="行进度">{{ phase.rows_done.toLocaleString() }} / {{ phase.rows_total.toLocaleString() }}</el-descriptions-item>
+                </el-descriptions>
+                <el-table v-if="phase.tables?.length" :data="phase.tables" size="small" style="margin-top: 12px;" max-height="200">
+                  <el-table-column prop="name" label="表名" />
+                  <el-table-column prop="state" label="状态" width="100">
+                    <template #default="{ row }">
+                      <el-tag :type="row.state === 'completed' ? 'success' : row.state === 'running' ? '' : row.state === 'failed' ? 'danger' : 'info'" size="small">
+                        {{ row.state === 'completed' ? '完成' : row.state === 'running' ? '运行中' : row.state === 'failed' ? '失败' : row.state === 'pending' ? '等待' : row.state }}
+                      </el-tag>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="行进度" width="180">
+                    <template #default="{ row }">
+                      {{ row.rows_done.toLocaleString() }} / {{ row.rows_total.toLocaleString() }}
+                    </template>
+                  </el-table-column>
+                </el-table>
               </div>
-            </div>
+              <div v-if="phaseLogs[phase.name]?.length === 0" style="color: #909399; text-align: center; padding: 20px;">
+                暂无日志
+              </div>
+              <div v-else class="phase-log-container">
+                <div v-for="(entry, idx) in phaseLogs[phase.name]" :key="idx" class="log-line" :class="logLevelClass(entry.level)">
+                  <span class="log-time">{{ entry.timestamp ? entry.timestamp.replace('T', ' ').substring(11, 19) : '' }}</span>
+                  <span class="log-level">[{{ entry.level }}]</span>
+                  <span class="log-msg">{{ entry.message }}</span>
+                </div>
+              </div>
+            </template>
           </el-tab-pane>
         </el-tabs>
       </el-card>
