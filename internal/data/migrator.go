@@ -442,6 +442,136 @@ func (m *Migrator) applyTargetPolicy(ctx context.Context, tidbDB *sql.DB, tables
 	return nil
 }
 
+func (m *Migrator) ensureTablesExist(ctx context.Context, tidbDB *sql.DB, pgSchema string, tables []string) error {
+	logger := zap.L()
+	for _, table := range tables {
+		var count int
+		err := tidbDB.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+			table).Scan(&count)
+		if err != nil {
+			return fmt.Errorf("check table %s: %w", table, err)
+		}
+		if count > 0 {
+			continue
+		}
+
+		logger.Info("table does not exist in target, creating from source schema", zap.String("table", table))
+
+		rows, err := m.pgDB.QueryContext(ctx,
+			`SELECT column_name, data_type, udt_name, is_nullable, column_default,
+			        character_maximum_length, numeric_precision, numeric_scale
+			 FROM information_schema.columns
+			 WHERE table_schema = $1 AND table_name = $2
+			 ORDER BY ordinal_position`, pgSchema, table)
+		if err != nil {
+			logger.Warn("failed to get source columns", zap.String("table", table), zap.Error(err))
+			continue
+		}
+
+		type colInfo struct {
+			Name       string
+			DataType   string
+			UDTName    string
+			IsNullable string
+		}
+		var columns []colInfo
+		for rows.Next() {
+			var c colInfo
+			var maxLen, numPrec, numScale sql.NullInt64
+			var colDefault sql.NullString
+			if err := rows.Scan(&c.Name, &c.DataType, &c.UDTName, &c.IsNullable, &colDefault, &maxLen, &numPrec, &numScale); err != nil {
+				rows.Close()
+				return err
+			}
+			columns = append(columns, c)
+		}
+		rows.Close()
+
+		if len(columns) == 0 {
+			continue
+		}
+
+		var colDefs []string
+		for _, c := range columns {
+			myType := pgTypeToMySQL(c.DataType, c.UDTName)
+			nullStr := "NULL"
+			if c.IsNullable == "NO" {
+				nullStr = "NOT NULL"
+			}
+			colDefs = append(colDefs, fmt.Sprintf("%s %s %s", quoteMySQL(c.Name), myType, nullStr))
+		}
+
+		ddl := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (%s)", quoteMySQL(table), strings.Join(colDefs, ", "))
+		if _, err := tidbDB.ExecContext(ctx, ddl); err != nil {
+			logger.Warn("failed to create table", zap.String("table", table), zap.Error(err))
+		}
+	}
+	return nil
+}
+
+func pgTypeToMySQL(dataType, udtName string) string {
+	if strings.HasPrefix(udtName, "_") || dataType == "ARRAY" {
+		return "JSON"
+	}
+	switch dataType {
+	case "integer", "int", "int4", "smallint", "int2":
+		return "INT"
+	case "bigint", "int8":
+		return "BIGINT"
+	case "serial":
+		return "INT AUTO_INCREMENT"
+	case "bigserial":
+		return "BIGINT AUTO_INCREMENT"
+	case "real", "float4":
+		return "FLOAT"
+	case "double precision", "float8":
+		return "DOUBLE"
+	case "numeric", "decimal":
+		return "DECIMAL(65,30)"
+	case "character varying", "varchar", "character", "char", "text":
+		return "TEXT"
+	case "boolean", "bool":
+		return "TINYINT(1)"
+	case "date":
+		return "DATE"
+	case "timestamp", "timestamp without time zone":
+		return "DATETIME"
+	case "timestamp with time zone", "timestamptz":
+		return "DATETIME"
+	case "time", "time without time zone":
+		return "TIME"
+	case "bytea":
+		return "BLOB"
+	case "json", "jsonb":
+		return "JSON"
+	case "uuid":
+		return "CHAR(36)"
+	case "interval":
+		return "VARCHAR(64)"
+	case "bit", "bit varying":
+		return "BLOB"
+	case "oid":
+		return "BIGINT"
+	case "money":
+		return "DECIMAL(19,2)"
+	case "inet":
+		return "VARCHAR(45)"
+	case "macaddr":
+		return "VARCHAR(17)"
+	case "point", "line", "lseg", "box", "path", "polygon", "circle":
+		return "TEXT"
+	case "tsvector", "tsquery":
+		return "TEXT"
+	case "xml":
+		return "LONGTEXT"
+	case "user-defined":
+		return "TEXT"
+	default:
+		return "TEXT"
+	}
+}
+
 func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error {
 	logger := zap.L()
 	logger.Info("starting streaming SQL import (batch INSERT)")
@@ -472,6 +602,10 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 
 	if err := m.applyTargetPolicy(ctx, tidbDB, tables); err != nil {
 		return err
+	}
+
+	if err := m.ensureTablesExist(ctx, tidbDB, schema, tables); err != nil {
+		logger.Warn("some tables may not exist in target", zap.Error(err))
 	}
 
 	batchSize := opts.BatchSize
