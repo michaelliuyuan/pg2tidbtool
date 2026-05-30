@@ -61,9 +61,6 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 	}
 
 	cpDir := m.cfg.Migration.CheckpointDir
-	if opts.TempDir != "" {
-		cpDir = filepath.Join(opts.TempDir, ".checkpoint")
-	}
 	m.cpMgr, err = checkpoint.NewManager(cpDir)
 	if err != nil {
 		return nil, cerrors.Wrap(cerrors.ErrCheckpointLoad, "init checkpoint", err)
