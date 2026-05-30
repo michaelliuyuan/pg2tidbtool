@@ -619,6 +619,12 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 	for _, table := range tables {
 		logger.Info("streaming table to TiDB", zap.String("table", table))
 
+		// Get row count for progress
+		rowCount, _ := m.getRowCount(ctx, table)
+		if rowCount > 0 {
+			logger.Info("table row count", zap.String("table", table), zap.Int64("rows", rowCount))
+		}
+
 		selectQuery := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
 		rows, err := m.pgDB.QueryContext(ctx, selectQuery)
 		if err != nil {
@@ -677,6 +683,7 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 					continue
 				}
 				totalRows += len(batch)
+				logger.Info("batch inserted", zap.String("table", table), zap.Int("rows_in_batch", totalRows), zap.Int64("total", rowCount))
 				batch = batch[:0]
 			}
 		}
@@ -693,7 +700,7 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 			}
 		}
 
-		logger.Info("table imported", zap.String("table", table), zap.Int("rows", totalRows))
+		logger.Info("table import completed", zap.String("table", table), zap.Int("rows", totalRows))
 	}
 
 	return nil
@@ -759,7 +766,7 @@ func convertSQLValue(val interface{}) interface{} {
 	switch v := val.(type) {
 	case []byte:
 		s := string(v)
-		if len(s) >= 2 && s[0] == '{' && s[len(s)-1] == '}' {
+		if isPGArray(s) {
 			return pgArrayToJSON(s)
 		}
 		return s
@@ -768,6 +775,23 @@ func convertSQLValue(val interface{}) interface{} {
 	default:
 		return v
 	}
+}
+
+func isPGArray(s string) bool {
+	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
+		return false
+	}
+	if len(s) == 2 {
+		return true
+	}
+	inner := s[1]
+	// PG array: {1,2,3}, {a,b}, {NULL}, nested {{1,2},{3,4}}
+	// JSON object: {"key":...} — starts with " after {
+	// JSON array: [1,2,3] — doesn't start with {
+	if inner == '"' || inner == '[' {
+		return false
+	}
+	return true
 }
 
 func pgArrayToJSON(s string) string {
