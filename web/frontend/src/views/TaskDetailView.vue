@@ -354,9 +354,13 @@ function logLevelClass(level: string): string {
                     {{ phase.status === 'completed' ? '已完成' : phase.status === 'running' ? '进行中' : phase.status === 'failed' ? '失败' : '等待中' }}
                   </el-tag>
                 </div>
-                <div v-if="phase.table_count > 0 && (phase.name === 'data' || phase.name === 'schema')" style="margin-top: 8px; color: #606266; font-size: 13px;">
+                <div v-if="phase.table_count > 0 && phase.name === 'data'" style="margin-top: 8px; color: #606266; font-size: 13px;">
                   表: {{ phase.tables_done }}/{{ phase.table_count }} · 行: {{ phase.rows_done.toLocaleString() }}/{{ phase.rows_total.toLocaleString() }}
                   <el-progress :percentage="phase.rows_total > 0 ? Math.round(phase.rows_done / phase.rows_total * 100) : 0" :stroke-width="6" style="margin-top: 4px;" />
+                </div>
+                <div v-else-if="phase.table_count > 0 && phase.name === 'schema'" style="margin-top: 8px; color: #606266; font-size: 13px;">
+                  表: {{ phase.tables_done }}/{{ phase.table_count }}
+                  <el-progress :percentage="phase.table_count > 0 ? Math.round(phase.tables_done / phase.table_count * 100) : 0" :stroke-width="6" style="margin-top: 4px;" />
                 </div>
                 <div v-if="phaseLogs[phase.name]?.length" style="margin-top: 8px;">
                   <el-tag size="small" type="info" style="cursor: pointer;" @click="logPhaseFilter = phase.name; logDrawerVisible = true">
@@ -377,7 +381,7 @@ function logLevelClass(level: string): string {
               该阶段尚未开始
             </div>
             <template v-else>
-              <div v-if="phase.table_count > 0 && (phase.name === 'data' || phase.name === 'schema')" style="margin-bottom: 16px;">
+              <div v-if="phase.table_count > 0 && phase.name === 'data'" style="margin-bottom: 16px;">
                 <el-descriptions :column="3" border size="small">
                   <el-descriptions-item label="表总数">{{ phase.table_count }}</el-descriptions-item>
                   <el-descriptions-item label="已完成">{{ phase.tables_done }}</el-descriptions-item>
@@ -395,6 +399,22 @@ function logLevelClass(level: string): string {
                   <el-table-column label="行进度" width="180">
                     <template #default="{ row }">
                       {{ row.rows_done.toLocaleString() }} / {{ row.rows_total.toLocaleString() }}
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+              <div v-else-if="phase.table_count > 0 && phase.name === 'schema'" style="margin-bottom: 16px;">
+                <el-descriptions :column="2" border size="small">
+                  <el-descriptions-item label="表总数">{{ phase.table_count }}</el-descriptions-item>
+                  <el-descriptions-item label="已完成">{{ phase.tables_done }}</el-descriptions-item>
+                </el-descriptions>
+                <el-table v-if="phase.tables?.length" :data="phase.tables" size="small" style="margin-top: 12px;" max-height="200">
+                  <el-table-column prop="name" label="表名" />
+                  <el-table-column prop="state" label="状态" width="100">
+                    <template #default="{ row }">
+                      <el-tag :type="row.state === 'completed' ? 'success' : row.state === 'running' ? '' : row.state === 'failed' ? 'danger' : 'info'" size="small">
+                        {{ row.state === 'completed' ? '完成' : row.state === 'running' ? '运行中' : row.state === 'failed' ? '失败' : row.state === 'pending' ? '等待' : row.state }}
+                      </el-tag>
                     </template>
                   </el-table-column>
                 </el-table>
