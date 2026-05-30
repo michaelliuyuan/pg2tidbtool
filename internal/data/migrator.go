@@ -624,17 +624,22 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 	var errMu sync.Mutex
 
 	for _, table := range tables {
-		m.cpMgr.GetOrCreateTable(table, 0)
+		rowCount, err := m.getRowCount(ctx, table)
+		if err != nil {
+			logger.Warn("failed to get row count", zap.String("table", table), zap.Error(err))
+			rowCount = 0
+		}
+		m.cpMgr.GetOrCreateTable(table, rowCount)
 		m.cpMgr.MarkTableRunning(table)
 
 		sem <- struct{}{}
 		wg.Add(1)
 
-		go func(tableName string) {
+		go func(tableName string, estimatedRows int64) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			if err := m.streamTable(ctx, tidbDB, schema, tableName, batchSize); err != nil {
+			if err := m.streamTable(ctx, tidbDB, schema, tableName, batchSize, estimatedRows); err != nil {
 				m.cpMgr.MarkTableFailed(tableName, err.Error())
 				if m.cfg.Migration.OnError != "skip" {
 					errMu.Lock()
@@ -647,7 +652,7 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 				logger.Warn("table stream error", zap.String("table", tableName), zap.Error(err))
 				return
 			}
-		}(table)
+		}(table, rowCount)
 	}
 
 	wg.Wait()
@@ -659,17 +664,23 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 	return nil
 }
 
-func (m *Migrator) streamTable(ctx context.Context, tidbDB *sql.DB, schema, table string, batchSize int) error {
+func (m *Migrator) streamTable(ctx context.Context, tidbDB *sql.DB, schema, table string, batchSize int, estimatedRows int64) error {
 	logger := zap.L()
 	logger.Info("streaming table to TiDB", zap.String("table", table))
 
-	rowCount, _ := m.getRowCount(ctx, table)
+	rowCount := estimatedRows
 	if rowCount > 0 {
 		logger.Info("table row count", zap.String("table", table), zap.Int64("rows", rowCount))
 	}
-	m.cpMgr.UpdateTable(table, func(tc *checkpoint.TableCheckpoint) {
-		tc.RowsTotal = rowCount
-	})
+	if rowCount == 0 {
+		rc, _ := m.getRowCount(ctx, table)
+		rowCount = rc
+		if rowCount > 0 {
+			m.cpMgr.UpdateTable(table, func(tc *checkpoint.TableCheckpoint) {
+				tc.RowsTotal = rowCount
+			})
+		}
+	}
 
 	// Use a separate PG connection for this table
 	pgConn, err := m.pgDB.Conn(ctx)
