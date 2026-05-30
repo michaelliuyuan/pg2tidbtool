@@ -3,6 +3,7 @@ package data
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -766,6 +767,9 @@ func convertSQLValue(val interface{}) interface{} {
 	switch v := val.(type) {
 	case []byte:
 		s := string(v)
+		if json.Valid([]byte(s)) {
+			return s
+		}
 		if isPGArray(s) {
 			return pgArrayToJSON(s)
 		}
@@ -779,16 +783,6 @@ func convertSQLValue(val interface{}) interface{} {
 
 func isPGArray(s string) bool {
 	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
-		return false
-	}
-	if len(s) == 2 {
-		return true
-	}
-	inner := s[1]
-	// PG array: {1,2,3}, {a,b}, {NULL}, nested {{1,2},{3,4}}
-	// JSON object: {"key":...} — starts with " after {
-	// JSON array: [1,2,3] — doesn't start with {
-	if inner == '"' || inner == '[' {
 		return false
 	}
 	return true
