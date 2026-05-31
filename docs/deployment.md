@@ -1,17 +1,19 @@
-# pg2tidb-migrator 部署手册
+# pg2tidb 部署手册
 
 ## 1. 环境要求
 
-| 组件 | 版本要求 |
-|------|----------|
-| Go | 1.22+ |
-| PostgreSQL | 12+（源端） |
-| TiDB | 6.0+（目标端） |
-| 网络 | 迁移工具需同时访问 PG 和 TiDB |
+| 组件 | 版本要求 | 说明 |
+|------|----------|------|
+| Go | 1.22+ | 仅源码编译时需要 |
+| Node.js | 20+ | 仅构建前端时需要 |
+| PostgreSQL | 10+ | 源端数据库 |
+| TiDB | 7.1+ | 目标端数据库 |
+| tidb-lightning | 可选 | 使用 Lightning 物理导入时需要 |
+| 网络 | — | 迁移工具需同时访问 PG 和 TiDB |
 
 ## 2. 编译安装
 
-### 方式一：本地编译
+### 方式一：本地编译（仅 CLI）
 
 ```bash
 # 安装 Go 1.22+
@@ -29,20 +31,68 @@ make build
 ./build/pg2tidb --help
 ```
 
-### 方式二：Docker 编译
+### 方式二：本地编译（含 Web UI）
 
 ```bash
 git clone https://github.com/michaelliuyuan/pg2tidbtool.git
 cd pg2tidbtool
-docker build -t pg2tidb-builder .
+
+# 需要安装 Node.js 20+
+bash build-web.sh
+
+# 产物在 build/pg2tidb（内嵌前端静态文件）
+./build/pg2tidb web --port 8080
+```
+
+或使用 Make：
+
+```bash
+make build-web
+```
+
+### 方式三：Docker
+
+```bash
+git clone https://github.com/michaelliuyuan/pg2tidbtool.git
+cd pg2tidbtool
+docker build -t pg2tidb .
+
+# 启动 Web UI
+docker run -p 8080:8080 pg2tidb
 
 # 提取二进制
-docker create --name tmp pg2tidb-builder
+docker create --name tmp pg2tidb
 docker cp tmp:/usr/local/bin/pg2tidb ./pg2tidb
 docker rm tmp
 ```
 
-## 3. 配置文件
+### 方式四：交叉编译
+
+```bash
+# Linux ARM64
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o build/pg2tidb .
+
+# macOS
+GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o build/pg2tidb .
+```
+
+## 3. 安装 tidb-lightning（Lightning 导入模式）
+
+如果使用 `use_lightning: true`（默认），需要在运行 pg2tidb 的服务器上安装 `tidb-lightning`：
+
+```bash
+# 下载 TiDB Lightning（示例版本，请根据需要调整）
+wget https://download.pingcap.org/tidb-toolkit-v7.1.0-linux-amd64.tar.gz
+tar -xzf tidb-toolkit-v7.1.0-linux-amd64.tar.gz
+sudo cp tidb-toolkit-v7.1.0-linux-amd64/bin/tidb-lightning /usr/local/bin/
+
+# 验证
+tidb-lightning --version
+```
+
+> **注意**：如果不安装 tidb-lightning，数据导入会自动回退为流式 INSERT 模式（速度较慢但功能完整）。
+
+## 4. 配置文件
 
 创建配置文件 `config.yaml`：
 
@@ -62,6 +112,8 @@ target:
   user: "root"
   password: "your-password"
   database: "mydb"
+  pd_addr: "your-tidb-host:2379"    # Lightning 导入时必填
+  status_port: 10080                  # TiDB Status 端口
 
 migration:
   parallel: 4           # 并行 worker 数
@@ -69,28 +121,53 @@ migration:
   temp_dir: "/tmp/pg2tidb"  # CSV 临时目录
   tables: []            # 空=迁移所有表，或指定表名列表
   exclude_tables: []    # 排除的表
-  use_lightning: true   # 使用 LOAD DATA 导入
+  use_lightning: true   # 使用 TiDB Lightning 物理导入
   on_error: "abort"     # abort 或 skip
+  target_policy: "insert"  # insert | truncate | drop
   checkpoint_dir: ".checkpoint"
   read_timeout: "30m"
   write_timeout: "30m"
 
 logging:
-  level: "info"         # debug/info/warn/error
-  format: "console"     # console 或 json
-  output: ""            # 空=仅 stderr，或指定日志文件路径
+  level: "info"
+  format: "console"
+  output: ""
 
 web:
-  enable: false         # 启用 Web 监控面板
+  enable: false
   port: 8080
   host: "0.0.0.0"
 ```
 
-## 4. 使用方法
+### target_policy 说明
 
-### 4.1 预检查
+| 策略 | 行为 |
+|------|------|
+| `insert` | 直接 INSERT，主键冲突时报错（默认） |
+| `truncate` | 先 TRUNCATE 目标表再导入 |
+| `drop` | 先 DROP TABLE 再重建并导入 |
 
-迁移前先运行 precheck 确认环境兼容性：
+## 5. 使用方法
+
+### 5.1 Web UI 模式（推荐）
+
+```bash
+# 启动 Web 服务
+./pg2tidb web --port 8080
+
+# 指定数据目录（存储迁移历史、SQLite 数据库）
+./pg2tidb web --port 8080 --data /data/pg2tidb
+```
+
+访问 `http://<host>:8080`，按向导操作：
+
+1. 填写 PostgreSQL 连接信息 → 测试连接
+2. 填写 TiDB 连接信息 → 测试连接
+3. 查看并勾选待迁移的表（支持搜索）
+4. 配置迁移参数（并发数、Lightning 开关、冲突策略）
+5. 确认并启动，实时监控进度
+
+### 5.2 预检查
 
 ```bash
 ./pg2tidb precheck -c config.yaml --report precheck-report.json
@@ -103,7 +180,7 @@ web:
 - 不兼容对象扫描（触发器/函数/枚举/扩展）
 - 字符集校验
 
-### 4.2 Schema 迁移
+### 5.3 Schema 迁移
 
 ```bash
 # 直接在 TiDB 执行 DDL
@@ -116,24 +193,10 @@ web:
 ./pg2tidb schema -c config.yaml --exclude-tables log_table,temp_table
 ```
 
-类型映射示例：
-| PostgreSQL | TiDB/MySQL |
-|-----------|-----------|
-| integer | INT |
-| bigint | BIGINT |
-| serial | INT AUTO_INCREMENT |
-| varchar(n) | VARCHAR(n) |
-| text | TEXT |
-| boolean | TINYINT(1) |
-| bytea | BLOB |
-| jsonb | JSON |
-| uuid | CHAR(36) |
-| timestamp with tz | TIMESTAMP |
-| numeric(p,s) | DECIMAL(p,s) |
-
-### 4.3 数据迁移
+### 5.4 数据迁移
 
 ```bash
+# 默认参数
 ./pg2tidb data -c config.yaml
 
 # 自定义参数
@@ -144,26 +207,14 @@ web:
   --tables users,orders,products
 ```
 
-数据导出流程：
-1. 通过 PG `COPY TO STDOUT` 协议并行导出
-2. 每张表生成一个 tab 分隔的 CSV 文件
-3. boolean `t/f` → `1/0`，NULL → `\N`
-4. 支持 checkpoint 断点续传
+数据迁移流程：
+1. 通过 PG `COPY TO STDOUT` 协议并行导出为 CSV（tab 分隔）
+2. boolean `t/f` → `1/0`，NULL → `\N`
+3. 如果 `use_lightning: true`：调用 `tidb-lightning` 物理导入（100~500 GiB/h）
+4. 如果 Lightning 不可用或失败：自动回退为流式 INSERT
+5. 支持 checkpoint 断点续传
 
-数据导入流程：
-1. 使用 `LOAD DATA LOCAL INFILE` 导入 TiDB
-2. 文件格式：tab 分隔，`\N` 表示 NULL
-3. 导入前需 `mysql.RegisterLocalFile` 注册文件
-
-实际执行的 SQL：
-```sql
-LOAD DATA LOCAL INFILE '/tmp/pg2tidb/users.csv' 
-INTO TABLE `users` 
-FIELDS TERMINATED BY '\t' 
-LINES TERMINATED BY '\n'
-```
-
-### 4.4 数据校验
+### 5.5 数据校验
 
 ```bash
 # L1: 行数对比
@@ -179,7 +230,7 @@ LINES TERMINATED BY '\n'
 ./pg2tidb validate -c config.yaml --level L2 --report validation-report.json
 ```
 
-### 4.5 全流程一键执行
+### 5.6 全流程一键执行
 
 ```bash
 # 完整流程：precheck → schema → data → validate
@@ -192,27 +243,9 @@ LINES TERMINATED BY '\n'
 ./pg2tidb all -c config.yaml --on-error-continue
 ```
 
-## 5. Web 监控面板
-
-```yaml
-# config.yaml 中启用
-web:
-  enable: true
-  port: 8080
-  host: "0.0.0.0"
-```
-
-启动后访问 `http://<host>:8080`
-
-REST API：
-- `GET /api/v1/status` — 全局迁移状态
-- `GET /api/v1/tables` — 各表进度
-- `GET /api/v1/validation` — 校验结果
-- `GET /api/v1/report` — 最终报告
-
 ## 6. 断点续传
 
-迁移进度自动保存在 `.checkpoint/checkpoint.json`。中断后重新执行相同命令，已完成的表会自动跳过。
+迁移进度自动保存在 `.checkpoint/` 目录。中断后重新执行相同命令，已完成的表会自动跳过。
 
 ```bash
 # 中断后重新执行
@@ -225,7 +258,8 @@ REST API：
 | 文件 | 说明 |
 |------|------|
 | `<temp_dir>/*.csv` | 每张表的导出数据 |
-| `.checkpoint/checkpoint.json` | 断点续传进度 |
+| `<temp_dir>/lightning.toml` | 自动生成的 Lightning 配置 |
+| `.checkpoint/` | 断点续传进度 |
 | `precheck-report.json` | 预检查报告 |
 | `validation-report.json` | 数据校验报告 |
 | `unsupported-objects.log` | 不兼容对象清单 |
@@ -238,6 +272,7 @@ REST API：
 | `migration.parallel` | CPU 核数 | 并行导出 worker 数 |
 | `migration.batch_size` | 100000-500000 | 大表可增大 |
 | `migration.temp_dir` | SSD 磁盘 | 临时文件放 SSD |
+| `migration.use_lightning` | true | 物理导入速度最快 |
 | `migration.read_timeout` | 30m-60m | 大表调整 |
 | `logging.level` | warn | 生产环境降低日志级别 |
 | `logging.format` | json | 生产环境用 JSON 格式 |
