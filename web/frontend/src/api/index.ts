@@ -102,6 +102,7 @@ export interface CreateTaskRequest {
     user: string
     password: string
     database: string
+    pd_addr: string
   }
   opts: {
     parallel: number

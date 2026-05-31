@@ -11,21 +11,21 @@ import (
 )
 
 type Config struct {
-	Source    SourceConfig    `yaml:"source"`
-	Target    TargetConfig    `yaml:"target"`
-	Migration MigrationConfig `yaml:"migration"`
-	Logging   LoggingConfig   `yaml:"logging"`
-	Web       WebConfig       `yaml:"web"`
+	Source    SourceConfig    `yaml:"source" json:"source"`
+	Target    TargetConfig    `yaml:"target" json:"target"`
+	Migration MigrationConfig `yaml:"migration" json:"migration"`
+	Logging   LoggingConfig   `yaml:"logging" json:"logging"`
+	Web       WebConfig       `yaml:"web" json:"web"`
 }
 
 type SourceConfig struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-	Database string `yaml:"database"`
-	Schema   string `yaml:"schema"`
-	SSLMode  string `yaml:"sslmode"`
+	Host     string `yaml:"host" json:"host"`
+	Port     int    `yaml:"port" json:"port"`
+	User     string `yaml:"user" json:"user"`
+	Password string `yaml:"password" json:"password"`
+	Database string `yaml:"database" json:"database"`
+	Schema   string `yaml:"schema" json:"schema"`
+	SSLMode  string `yaml:"sslmode" json:"sslmode"`
 }
 
 func (s SourceConfig) DSN() string {
@@ -38,12 +38,12 @@ func (s SourceConfig) DSN() string {
 }
 
 type TargetConfig struct {
-	Host     string `yaml:"host"`
-	Port     int    `yaml:"port"`
-	User     string `yaml:"user"`
-	Password string `yaml:"password"`
-	Database string `yaml:"database"`
-	PDAddr   string `yaml:"pd_addr"`
+	Host     string `yaml:"host" json:"host"`
+	Port     int    `yaml:"port" json:"port"`
+	User     string `yaml:"user" json:"user"`
+	Password string `yaml:"password" json:"password"`
+	Database string `yaml:"database" json:"database"`
+	PDAddr   string `yaml:"pd_addr" json:"pd_addr"`
 }
 
 func (t TargetConfig) DSN() string {
@@ -82,15 +82,15 @@ func (m MigrationConfig) WriteTimeoutDuration() time.Duration {
 }
 
 type LoggingConfig struct {
-	Level  string `yaml:"level"`
-	Format string `yaml:"format"`
-	Output string `yaml:"output"`
+	Level  string `yaml:"level" json:"level"`
+	Format string `yaml:"format" json:"format"`
+	Output string `yaml:"output" json:"output"`
 }
 
 type WebConfig struct {
-	Enable bool   `yaml:"enable"`
-	Port   int    `yaml:"port"`
-	Host   string `yaml:"host"`
+	Enable bool   `yaml:"enable" json:"enable"`
+	Port   int    `yaml:"port" json:"port"`
+	Host   string `yaml:"host" json:"host"`
 }
 
 func DefaultConfig() *Config {
