@@ -83,6 +83,9 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 
 	logger.Info("migrating tables", zap.Int("count", len(tables)))
 
+	var totalRows atomic.Int64
+	var totalBytes atomic.Int64
+
 	if !opts.UseLightning {
 		// Streaming INSERT path: skip CSV export, import directly via SQL
 		if err := m.importViaSQL(ctx, opts); err != nil {
@@ -92,9 +95,6 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 		// CSV export + LOAD DATA path
 		m.display = progress.NewDisplay()
 		m.display.Start()
-
-		var totalRows atomic.Int64
-		var totalBytes atomic.Int64
 
 		sem := make(chan struct{}, opts.Parallel)
 		var wg sync.WaitGroup
@@ -204,7 +204,9 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 
 	duration := time.Since(startTime)
 	result := &common.DataResult{
+		TotalRows:   totalRows.Load(),
 		TotalTables: len(tables),
+		TotalBytes:  totalBytes.Load(),
 		Duration:    formatDuration(duration),
 		ExportPath:  opts.TempDir,
 	}
