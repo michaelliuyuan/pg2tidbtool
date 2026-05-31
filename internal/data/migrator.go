@@ -175,6 +175,12 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 			if err := m.importViaSQL(ctx, opts); err != nil {
 				return nil, cerrors.Wrap(cerrors.ErrDataImport, "sql import", err)
 			}
+		} else {
+			// Lightning succeeded: mark all tables as completed in checkpoint
+			for _, table := range tables {
+				tc := m.cpMgr.GetOrCreateTable(table, 0)
+				m.cpMgr.MarkTableCompleted(table, tc.RowsTotal)
+			}
 		}
 	}
 
