@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,7 +15,6 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common"
@@ -319,23 +319,9 @@ func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string
 
 func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts) error {
 	logger := zap.L()
-	logger.Info("TiDB Lightning import starting", zap.String("dir", opts.TempDir))
+	logger.Info("TiDB IMPORT INTO starting", zap.String("dir", opts.TempDir))
 
-	mysqlCfg := mysql.Config{
-		User:                 m.cfg.Target.User,
-		Passwd:               m.cfg.Target.Password,
-		Net:                  "tcp",
-		Addr:                 fmt.Sprintf("%s:%d", m.cfg.Target.Host, m.cfg.Target.Port),
-		DBName:               m.cfg.Target.Database,
-		AllowAllFiles:        true,
-		ParseTime:            true,
-		ReadTimeout:          1800 * time.Second,
-		WriteTimeout:         1800 * time.Second,
-		Timeout:              30 * time.Second,
-		Params:               map[string]string{"charset": "utf8mb4"},
-	}
-
-	tidbDB, err := sql.Open("mysql", mysqlCfg.FormatDSN())
+	tidbDB, err := sql.Open("mysql", m.cfg.Target.DSN())
 	if err != nil {
 		return err
 	}
@@ -347,19 +333,6 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 
 	if err := tidbDB.PingContext(ctx); err != nil {
 		return fmt.Errorf("ping TiDB: %w", err)
-	}
-
-	var localInfile string
-	if err := tidbDB.QueryRowContext(ctx, "SHOW VARIABLES LIKE 'local_infile'").Scan(new(string), &localInfile); err == nil {
-		logger.Info("TiDB local_infile setting", zap.String("value", localInfile))
-		if localInfile != "ON" && localInfile != "1" {
-			logger.Info("enabling TiDB local_infile")
-			if _, err := tidbDB.ExecContext(ctx, "SET GLOBAL local_infile = 1"); err != nil {
-				logger.Warn("failed to enable local_infile, LOAD DATA may fail", zap.Error(err))
-			}
-		}
-	} else {
-		logger.Warn("could not check local_infile variable", zap.Error(err))
 	}
 
 	entries, err := os.ReadDir(opts.TempDir)
@@ -376,79 +349,72 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 		csvPath := filepath.Join(opts.TempDir, entry.Name())
 
 		fileInfo, _ := os.Stat(csvPath)
-		logger.Info("loading CSV into TiDB",
+		logger.Info("importing CSV into TiDB via IMPORT INTO",
 			zap.String("table", tableName),
 			zap.Int64("file_size", fileInfo.Size()))
 
-		if err := m.loadCSVToTiDB(ctx, tidbDB, tableName, csvPath); err != nil {
+		if err := m.importCSVToTiDB(ctx, tidbDB, tableName, csvPath); err != nil {
 			if m.cfg.Migration.OnError != "skip" {
 				return err
 			}
-			logger.Warn("failed to load table", zap.String("table", tableName), zap.Error(err))
+			logger.Warn("failed to import table", zap.String("table", tableName), zap.Error(err))
 		}
 	}
 
 	return nil
 }
 
-func (m *Migrator) loadCSVToTiDB(ctx context.Context, db *sql.DB, table, csvPath string) error {
+func (m *Migrator) importCSVToTiDB(ctx context.Context, db *sql.DB, table, csvPath string) error {
 	logger := zap.L()
-	mysql.RegisterLocalFile(csvPath)
-	defer mysql.DeregisterLocalFile(csvPath)
 
-	safePath := strings.ReplaceAll(csvPath, "\\", "\\\\")
+	absPath, err := filepath.Abs(csvPath)
+	if err != nil {
+		return fmt.Errorf("get absolute path for %s: %w", csvPath, err)
+	}
+
+	safePath := strings.ReplaceAll(absPath, "\\", "/")
 	safePath = strings.ReplaceAll(safePath, "'", "\\'")
 
-	query := fmt.Sprintf("LOAD DATA LOCAL INFILE '%s' INTO TABLE %s FIELDS TERMINATED BY '\\t' LINES TERMINATED BY '\\n'",
-		safePath, quoteMySQL(table))
+	query := fmt.Sprintf(
+		"IMPORT INTO %s FROM '%s' FORMAT 'csv' WITH FIELDS_TERMINATED_BY='\\\\t', FIELDS_DEFINED_NULL_BY='\\\\N', THREAD=%d, DISK_QUOTA='50GiB'",
+		quoteMySQL(table), safePath, runtime.NumCPU()/2)
 
-	logger.Info("executing LOAD DATA LOCAL INFILE",
+	logger.Info("executing IMPORT INTO",
 		zap.String("table", table),
 		zap.String("file", filepath.Base(csvPath)))
 
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
-			delay := time.Duration(attempt) * 3 * time.Second
-			logger.Info("retrying LOAD DATA",
+			delay := time.Duration(attempt) * 5 * time.Second
+			logger.Info("retrying IMPORT INTO",
 				zap.String("table", table),
 				zap.Int("attempt", attempt+1),
 				zap.Duration("delay", delay))
 			time.Sleep(delay)
 		}
-		conn, err := db.Conn(ctx)
-		if err != nil {
-			logger.Warn("failed to get DB connection",
-				zap.String("table", table),
-				zap.Int("attempt", attempt+1),
-				zap.Error(err))
-			lastErr = fmt.Errorf("get connection: %w", err)
-			continue
-		}
-		_, err = conn.ExecContext(ctx, query)
-		conn.Close()
+		_, err := db.ExecContext(ctx, query)
 		if err == nil {
-			logger.Info("LOAD DATA completed successfully",
+			logger.Info("IMPORT INTO completed successfully",
 				zap.String("table", table),
 				zap.Int("attempt", attempt+1))
 			return nil
 		}
 		lastErr = err
 		if isBadConnection(err) {
-			logger.Warn("LOAD DATA bad connection, will retry",
+			logger.Warn("IMPORT INTO bad connection, will retry",
 				zap.String("table", table),
 				zap.Int("attempt", attempt+1),
-				zap.String("error_type", "bad_connection"),
 				zap.Error(err))
 			continue
 		}
-		logger.Error("LOAD DATA failed with non-retryable error",
+		logger.Error("IMPORT INTO failed",
 			zap.String("table", table),
 			zap.Int("attempt", attempt+1),
 			zap.Error(err))
-		return fmt.Errorf("LOAD DATA LOCAL INFILE for table %s failed: %w", table, err)
+		return fmt.Errorf("IMPORT INTO for table %s failed: %w", table, err)
 	}
-	return fmt.Errorf("LOAD DATA LOCAL INFILE failed after 3 retries for table %s: %w", table, lastErr)
+	return fmt.Errorf("IMPORT INTO failed after 3 retries for table %s: %w", table, lastErr)
 }
 
 func isBadConnection(err error) bool {
