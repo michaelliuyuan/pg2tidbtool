@@ -156,7 +156,7 @@ export const apiClient = {
     api.get<Task>(`/tasks/${id}/progress`),
 
   getTaskReport: (id: string, format?: string) =>
-    api.get(`/tasks/${id}/report`, { params: { format } }),
+    api.get(`/tasks/${id}/report`, { params: { format }, responseType: format === 'json' ? 'json' : 'text' }),
 
   getTaskLogs: (id: string) =>
     api.get<TaskLogsResponse>(`/tasks/${id}/logs`),

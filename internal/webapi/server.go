@@ -19,6 +19,7 @@ import (
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/checkpoint"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/config"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/logger"
+	"github.com/pg2tidb/pg2tidb-migrator/internal/common/reporter"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/orchestrator"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/store"
 	"go.uber.org/zap"
@@ -756,33 +757,102 @@ func (s *Server) handleTaskReport(w http.ResponseWriter, r *http.Request) {
 
 	format := r.URL.Query().Get("format")
 	switch format {
+	case "html":
+		report := s.buildTaskReport(task)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=report-%s.html", taskID))
+		w.Write([]byte(report.ToHTML()))
 	case "json":
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=report-%s.json", taskID))
 		w.Write([]byte(task.ResultJSON))
 	default:
-		report := map[string]interface{}{
-			"task_id":     task.ID,
-			"name":        task.Name,
-			"status":      task.Status,
-			"phase":       task.Phase,
-			"progress":    task.Progress,
-			"tables_done": task.TablesDone,
-			"tables_total": task.TablesTotal,
-			"rows_done":   task.RowsDone,
-			"rows_total":  task.RowsTotal,
-			"created_at":  task.CreatedAt,
-			"started_at":  task.StartedAt,
-			"finished_at": task.FinishedAt,
-			"error":       task.Error,
-		}
-		if task.ResultJSON != "" {
-			var results interface{}
-			json.Unmarshal([]byte(task.ResultJSON), &results)
-			report["results"] = results
-		}
-		s.writeJSON(w, http.StatusOK, report)
+		report := s.buildTaskReport(task)
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=report-%s.html", taskID))
+		w.Write([]byte(report.ToHTML()))
 	}
+}
+
+func (s *Server) buildTaskReport(task *store.Task) *reporter.Report {
+	report := reporter.NewReport("Migration Report")
+	report.Tool = "TiMS"
+	report.Version = "1.0.0"
+
+	if task.StartedAt != nil {
+		report.StartTime = *task.StartedAt
+	}
+	if task.FinishedAt != nil {
+		report.EndTime = *task.FinishedAt
+	}
+	report.Duration = report.EndTime.Sub(report.StartTime).String()
+
+	if task.Status == store.TaskStatusCompleted {
+		report.Status = reporter.StatusPass
+	} else if task.Status == store.TaskStatusFailed {
+		report.Status = reporter.StatusFail
+	} else {
+		report.Status = reporter.StatusWarn
+	}
+
+	// Build table reports from checkpoint data
+	cfg := config.Config{}
+	if task.ConfigJSON != "" {
+		json.Unmarshal([]byte(task.ConfigJSON), &cfg)
+	}
+	cpDir := cfg.Migration.CheckpointDir
+	if cpDir == "" {
+		cpDir = fmt.Sprintf(".checkpoint/%s", task.ID)
+	}
+	if cpMgr, err := checkpoint.NewManager(cpDir); err == nil {
+		for _, tc := range cpMgr.GetAllTables() {
+			tr := reporter.TableReport{
+				TableName:  tc.TableName,
+				SourceRows: tc.RowsTotal,
+				TargetRows: tc.RowsDone,
+				Duration:   "",
+			}
+			if !tc.FinishedAt.IsZero() && !tc.StartedAt.IsZero() {
+				tr.Duration = tc.FinishedAt.Sub(tc.StartedAt).String()
+			}
+			switch tc.State {
+			case checkpoint.StateCompleted:
+				tr.Status = reporter.StatusPass
+			case checkpoint.StateFailed:
+				tr.Status = reporter.StatusFail
+				tr.Error = tc.Error
+			default:
+				tr.Status = reporter.StatusSkip
+			}
+			if tr.SourceRows > 0 && tr.TargetRows > 0 {
+				tr.DiffRows = tr.SourceRows - tr.TargetRows
+			}
+			report.AddTableReport(tr)
+		}
+	}
+
+	// Build summary
+	var summaryParts []string
+	summaryParts = append(summaryParts, fmt.Sprintf("Source: %s:%d/%s", cfg.Source.Host, cfg.Source.Port, cfg.Source.Database))
+	summaryParts = append(summaryParts, fmt.Sprintf("Target: %s:%d/%s", cfg.Target.Host, cfg.Target.Port, cfg.Target.Database))
+	summaryParts = append(summaryParts, fmt.Sprintf("Tables: %d/%d completed", task.TablesDone, task.TablesTotal))
+	summaryParts = append(summaryParts, fmt.Sprintf("Rows: %d/%d", task.RowsDone, task.RowsTotal))
+	if task.Error != "" {
+		summaryParts = append(summaryParts, fmt.Sprintf("Error: %s", task.Error))
+	}
+	report.Summary = strings.Join(summaryParts, " | ")
+
+	report.Finish(report.Status, report.Summary)
+	// Restore the actual times after Finish overwrites them
+	if task.StartedAt != nil {
+		report.StartTime = *task.StartedAt
+	}
+	if task.FinishedAt != nil {
+		report.EndTime = *task.FinishedAt
+	}
+	report.Duration = report.EndTime.Sub(report.StartTime).String()
+
+	return report
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {

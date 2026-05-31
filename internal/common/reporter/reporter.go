@@ -143,5 +143,132 @@ func (r *Report) Save(path string) error {
 	if strings.HasSuffix(path, ".json") {
 		return r.SaveJSON(path)
 	}
+	if strings.HasSuffix(path, ".html") {
+		return r.SaveHTML(path)
+	}
 	return r.SaveText(path)
+}
+
+func (r *Report) SaveHTML(path string) error {
+	html := r.ToHTML()
+	return os.WriteFile(path, []byte(html), 0644)
+}
+
+func (r *Report) ToHTML() string {
+	var sb strings.Builder
+	sb.WriteString(`<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TiMS Migration Report</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f0f2f5; color: #333; line-height: 1.6; }
+.container { max-width: 960px; margin: 0 auto; padding: 24px; }
+.header { background: linear-gradient(135deg, #1a1a2e, #16213e); color: #fff; padding: 32px; border-radius: 12px; margin-bottom: 24px; }
+.header h1 { font-size: 28px; margin-bottom: 8px; }
+.header .logo { color: #e23d3d; font-weight: 900; }
+.header .subtitle { color: #aaa; font-size: 14px; }
+.card { background: #fff; border-radius: 10px; padding: 24px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.card h2 { font-size: 18px; margin-bottom: 16px; color: #1a1a2e; border-bottom: 2px solid #e8e8e8; padding-bottom: 8px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 16px; margin-bottom: 12px; }
+.stat { text-align: center; padding: 16px; background: #fafafa; border-radius: 8px; }
+.stat .value { font-size: 28px; font-weight: 700; color: #1a1a2e; }
+.stat .label { font-size: 12px; color: #888; margin-top: 4px; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { background: #1a1a2e; color: #fff; padding: 10px 12px; text-align: left; font-weight: 600; }
+td { padding: 10px 12px; border-bottom: 1px solid #eee; }
+tr:hover td { background: #f8f9fa; }
+.badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+.badge-pass { background: #e6f7e6; color: #2e7d32; }
+.badge-fail { background: #fde8e8; color: #c62828; }
+.badge-warn { background: #fff3e0; color: #e65100; }
+.badge-skip { background: #f0f0f0; color: #666; }
+.overall-pass { color: #2e7d32; }
+.overall-fail { color: #c62828; }
+.overall-warn { color: #e65100; }
+.footer { text-align: center; color: #aaa; font-size: 12px; margin-top: 24px; }
+.summary { background: #f6f8fa; padding: 16px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
+.info-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f0f0f0; }
+.info-row:last-child { border-bottom: none; }
+.info-label { color: #666; min-width: 120px; }
+.info-value { font-weight: 500; text-align: right; }
+@media print { body { background: #fff; } .container { padding: 0; } .card { box-shadow: none; border: 1px solid #ddd; } }
+</style>
+</head>
+<body>
+<div class="container">
+`)
+	sb.WriteString(`<div class="header">
+<h1><span class="logo">Ti</span>MS Migration Report</h1>
+<div class="subtitle">`)
+	sb.WriteString(htmlEsc(r.Phase))
+	sb.WriteString(` &middot; `)
+	sb.WriteString(htmlEsc(r.StartTime.Format("2006-01-02 15:04:05")))
+	sb.WriteString(` ~ `)
+	sb.WriteString(htmlEsc(r.EndTime.Format("2006-01-02 15:04:05")))
+	sb.WriteString(`</div></div>`)
+
+	// Overview card
+	statusClass := "overall-" + string(r.Status)
+	sb.WriteString(`<div class="card"><h2>Overview</h2><div class="stats">`)
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value %s">%s</div><div class="label">Status</div></div>`, statusClass, htmlEsc(string(r.Status))))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value">%s</div><div class="label">Duration</div></div>`, htmlEsc(r.Duration)))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value">%d</div><div class="label">Total Tables</div></div>`, r.Stats.TotalTables))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value">%d</div><div class="label">Source Rows</div></div>`, r.Stats.TotalSourceRows))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value">%d</div><div class="label">Target Rows</div></div>`, r.Stats.TotalTargetRows))
+	sb.WriteString(`</div>`)
+	if r.Summary != "" {
+		sb.WriteString(fmt.Sprintf(`<div class="summary">%s</div>`, htmlEsc(r.Summary)))
+	}
+	sb.WriteString(`</div>`)
+
+	// Stats card
+	sb.WriteString(`<div class="card"><h2>Statistics</h2><div class="stats">`)
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#2e7d32">%d</div><div class="label">Pass</div></div>`, r.Stats.PassTables))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#c62828">%d</div><div class="label">Fail</div></div>`, r.Stats.FailTables))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#e65100">%d</div><div class="label">Warn</div></div>`, r.Stats.WarnTables))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#666">%d</div><div class="label">Skip</div></div>`, r.Stats.SkipTables))
+	if r.Stats.TotalDiffRows != 0 {
+		sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#c62828">%d</div><div class="label">Diff Rows</div></div>`, r.Stats.TotalDiffRows))
+	} else {
+		sb.WriteString(`<div class="stat"><div class="value" style="color:#2e7d32">0</div><div class="label">Diff Rows</div></div>`)
+	}
+	sb.WriteString(`</div></div>`)
+
+	// Table detail card
+	if len(r.Tables) > 0 {
+		sb.WriteString(`<div class="card"><h2>Table Details</h2><table><thead><tr>`)
+		sb.WriteString(`<th>#</th><th>Table</th><th>Status</th><th>Source Rows</th><th>Target Rows</th><th>Diff</th><th>Duration</th><th>Error</th>`)
+		sb.WriteString(`</tr></thead><tbody>`)
+		for i, t := range r.Tables {
+			badgeClass := "badge-" + string(t.Status)
+			errStr := htmlEsc(t.Error)
+			if len(errStr) > 60 {
+				errStr = errStr[:60] + "..."
+			}
+			diffStr := ""
+			if t.DiffRows != 0 {
+				diffStr = fmt.Sprintf("%d", t.DiffRows)
+			}
+			sb.WriteString(fmt.Sprintf(`<tr><td>%d</td><td>%s</td><td><span class="badge %s">%s</span></td><td>%d</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
+				i+1, htmlEsc(t.TableName), badgeClass, htmlEsc(string(t.Status)), t.SourceRows, t.TargetRows, diffStr, htmlEsc(t.Duration), errStr))
+		}
+		sb.WriteString(`</tbody></table></div>`)
+	}
+
+	sb.WriteString(`<div class="footer">Generated by TiMS (TiDB Migration Suite) &middot; `)
+	sb.WriteString(htmlEsc(time.Now().Format("2006-01-02 15:04:05")))
+	sb.WriteString(`</div></div></body></html>`)
+
+	return sb.String()
+}
+
+func htmlEsc(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	s = strings.ReplaceAll(s, `"`, "&quot;")
+	return s
 }
