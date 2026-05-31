@@ -332,6 +332,7 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 	} else {
 		dsn = strings.Replace(dsn, "readTimeout=300s", "readTimeout=1800s", 1)
 	}
+	dsn += "&allowLocalInfile=true"
 
 	tidbDB, err := sql.Open("mysql", dsn)
 	if err != nil {
@@ -347,6 +348,19 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 		return fmt.Errorf("ping TiDB: %w", err)
 	}
 
+	var localInfile string
+	if err := tidbDB.QueryRowContext(ctx, "SHOW VARIABLES LIKE 'local_infile'").Scan(new(string), &localInfile); err == nil {
+		logger.Info("TiDB local_infile setting", zap.String("value", localInfile))
+		if localInfile != "ON" && localInfile != "1" {
+			logger.Info("enabling TiDB local_infile")
+			if _, err := tidbDB.ExecContext(ctx, "SET GLOBAL local_infile = 1"); err != nil {
+				logger.Warn("failed to enable local_infile, LOAD DATA may fail", zap.Error(err))
+			}
+		}
+	} else {
+		logger.Warn("could not check local_infile variable", zap.Error(err))
+	}
+
 	entries, err := os.ReadDir(opts.TempDir)
 	if err != nil {
 		return err
@@ -360,7 +374,10 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 		tableName := strings.TrimSuffix(entry.Name(), ".csv")
 		csvPath := filepath.Join(opts.TempDir, entry.Name())
 
-		logger.Info("loading CSV into TiDB", zap.String("table", tableName))
+		fileInfo, _ := os.Stat(csvPath)
+		logger.Info("loading CSV into TiDB",
+			zap.String("table", tableName),
+			zap.Int64("file_size", fileInfo.Size()))
 
 		if err := m.loadCSVToTiDB(ctx, tidbDB, tableName, csvPath); err != nil {
 			if m.cfg.Migration.OnError != "skip" {
@@ -374,6 +391,7 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 }
 
 func (m *Migrator) loadCSVToTiDB(ctx context.Context, db *sql.DB, table, csvPath string) error {
+	logger := zap.L()
 	mysql.RegisterLocalFile(csvPath)
 	defer mysql.DeregisterLocalFile(csvPath)
 
@@ -383,32 +401,53 @@ func (m *Migrator) loadCSVToTiDB(ctx context.Context, db *sql.DB, table, csvPath
 	query := fmt.Sprintf("LOAD DATA LOCAL INFILE '%s' INTO TABLE %s FIELDS TERMINATED BY '\\t' LINES TERMINATED BY '\\n'",
 		safePath, quoteMySQL(table))
 
-	logger := zap.L()
+	logger.Info("executing LOAD DATA LOCAL INFILE",
+		zap.String("table", table),
+		zap.String("file", filepath.Base(csvPath)))
+
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * 3 * time.Second)
+			delay := time.Duration(attempt) * 3 * time.Second
+			logger.Info("retrying LOAD DATA",
+				zap.String("table", table),
+				zap.Int("attempt", attempt+1),
+				zap.Duration("delay", delay))
+			time.Sleep(delay)
 		}
 		conn, err := db.Conn(ctx)
 		if err != nil {
-			lastErr = err
+			logger.Warn("failed to get DB connection",
+				zap.String("table", table),
+				zap.Int("attempt", attempt+1),
+				zap.Error(err))
+			lastErr = fmt.Errorf("get connection: %w", err)
 			continue
 		}
 		_, err = conn.ExecContext(ctx, query)
 		conn.Close()
 		if err == nil {
-			logger.Info("LOAD DATA completed", zap.String("table", table))
+			logger.Info("LOAD DATA completed successfully",
+				zap.String("table", table),
+				zap.Int("attempt", attempt+1))
 			return nil
 		}
 		lastErr = err
 		if isBadConnection(err) {
-			logger.Warn("bad connection, retrying LOAD DATA", zap.Int("attempt", attempt+1), zap.String("table", table), zap.Error(err))
+			logger.Warn("LOAD DATA bad connection, will retry",
+				zap.String("table", table),
+				zap.Int("attempt", attempt+1),
+				zap.String("error_type", "bad_connection"),
+				zap.Error(err))
 			continue
 		}
-		logger.Error("LOAD DATA failed", zap.String("table", table), zap.Error(err))
-		return err
+		logger.Error("LOAD DATA failed with non-retryable error",
+			zap.String("table", table),
+			zap.Int("attempt", attempt+1),
+			zap.Error(err))
+		return fmt.Errorf("LOAD DATA LOCAL INFILE for table %s failed: %w", table, err)
 	}
-	return fmt.Errorf("LOAD DATA failed after 3 retries for table %s: %w", table, lastErr)
+	return fmt.Errorf("LOAD DATA LOCAL INFILE failed after 3 retries for table %s: %w", table, lastErr)
 }
 
 func isBadConnection(err error) bool {
