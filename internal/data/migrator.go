@@ -343,6 +343,30 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 		return fmt.Errorf("get absolute path: %w", err)
 	}
 
+	// Rename CSV files from {table}.csv to {database}.{table}.csv for Lightning file router
+	targetDB := m.cfg.Target.Database
+	if targetDB == "" {
+		targetDB = "test"
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".csv") {
+			continue
+		}
+		// Skip if already has database prefix
+		if strings.Count(entry.Name(), ".") >= 2 {
+			continue
+		}
+		tableName := strings.TrimSuffix(entry.Name(), ".csv")
+		newName := targetDB + "." + tableName + ".csv"
+		oldPath := filepath.Join(absDir, entry.Name())
+		newPath := filepath.Join(absDir, newName)
+		if err := os.Rename(oldPath, newPath); err != nil {
+			logger.Warn("failed to rename CSV file for Lightning", zap.String("old", entry.Name()), zap.String("new", newName), zap.Error(err))
+		} else {
+			logger.Info("renamed CSV for Lightning", zap.String("old", entry.Name()), zap.String("new", newName))
+		}
+	}
+
 	lightningBin := "tidb-lightning"
 	if path, err := exec.LookPath("tidb-lightning"); err == nil {
 		lightningBin = path
