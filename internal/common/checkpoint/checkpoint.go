@@ -211,6 +211,17 @@ func (m *Manager) GetAllTables() map[string]*TableCheckpoint {
 	return result
 }
 
+func (m *Manager) ResetAllTables() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, tc := range m.data.Tables {
+		tc.State = StatePending
+		tc.RowsDone = 0
+		tc.BytesDone = 0
+	}
+	_ = m.save()
+}
+
 func (m *Manager) Summary() (completed, failed, pending, running int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
