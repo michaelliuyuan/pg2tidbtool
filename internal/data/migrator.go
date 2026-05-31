@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -319,102 +319,160 @@ func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string
 
 func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts) error {
 	logger := zap.L()
-	logger.Info("TiDB IMPORT INTO starting", zap.String("dir", opts.TempDir))
-
-	tidbDB, err := sql.Open("mysql", m.cfg.Target.DSN())
-	if err != nil {
-		return err
-	}
-	defer tidbDB.Close()
-
-	tidbDB.SetConnMaxLifetime(30 * time.Minute)
-	tidbDB.SetConnMaxIdleTime(10 * time.Minute)
-	tidbDB.SetMaxOpenConns(4)
-
-	if err := tidbDB.PingContext(ctx); err != nil {
-		return fmt.Errorf("ping TiDB: %w", err)
-	}
+	logger.Info("TiDB Lightning import starting", zap.String("dir", opts.TempDir))
 
 	entries, err := os.ReadDir(opts.TempDir)
 	if err != nil {
 		return err
 	}
 
+	hasCSV := false
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".csv") {
-			continue
-		}
-
-		tableName := strings.TrimSuffix(entry.Name(), ".csv")
-		csvPath := filepath.Join(opts.TempDir, entry.Name())
-
-		fileInfo, _ := os.Stat(csvPath)
-		logger.Info("importing CSV into TiDB via IMPORT INTO",
-			zap.String("table", tableName),
-			zap.Int64("file_size", fileInfo.Size()))
-
-		if err := m.importCSVToTiDB(ctx, tidbDB, tableName, csvPath); err != nil {
-			if m.cfg.Migration.OnError != "skip" {
-				return err
-			}
-			logger.Warn("failed to import table", zap.String("table", tableName), zap.Error(err))
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".csv") {
+			hasCSV = true
+			break
 		}
 	}
+	if !hasCSV {
+		logger.Warn("no CSV files found in temp dir, skipping Lightning import")
+		return nil
+	}
 
-	return nil
-}
-
-func (m *Migrator) importCSVToTiDB(ctx context.Context, db *sql.DB, table, csvPath string) error {
-	logger := zap.L()
-
-	absPath, err := filepath.Abs(csvPath)
+	absDir, err := filepath.Abs(opts.TempDir)
 	if err != nil {
-		return fmt.Errorf("get absolute path for %s: %w", csvPath, err)
+		return fmt.Errorf("get absolute path: %w", err)
 	}
 
-	safePath := strings.ReplaceAll(absPath, "\\", "/")
-	safePath = strings.ReplaceAll(safePath, "'", "\\'")
-
-	query := fmt.Sprintf(
-		"IMPORT INTO %s FROM '%s' FORMAT 'csv' WITH FIELDS_TERMINATED_BY='\\\\t', FIELDS_DEFINED_NULL_BY='\\\\N', THREAD=%d, DISK_QUOTA='50GiB'",
-		quoteMySQL(table), safePath, runtime.NumCPU()/2)
-
-	logger.Info("executing IMPORT INTO",
-		zap.String("table", table),
-		zap.String("file", filepath.Base(csvPath)))
-
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			delay := time.Duration(attempt) * 5 * time.Second
-			logger.Info("retrying IMPORT INTO",
-				zap.String("table", table),
-				zap.Int("attempt", attempt+1),
-				zap.Duration("delay", delay))
-			time.Sleep(delay)
-		}
-		_, err := db.ExecContext(ctx, query)
-		if err == nil {
-			logger.Info("IMPORT INTO completed successfully",
-				zap.String("table", table),
-				zap.Int("attempt", attempt+1))
-			return nil
-		}
-		lastErr = err
-		if isBadConnection(err) {
-			logger.Warn("IMPORT INTO bad connection, will retry",
-				zap.String("table", table),
-				zap.Int("attempt", attempt+1),
-				zap.Error(err))
-			continue
-		}
-		logger.Error("IMPORT INTO failed",
-			zap.String("table", table),
-			zap.Int("attempt", attempt+1),
-			zap.Error(err))
-		return fmt.Errorf("IMPORT INTO for table %s failed: %w", table, err)
+	sortedKVDir := filepath.Join(absDir, ".sorted-kv")
+	if err := os.MkdirAll(sortedKVDir, 0755); err != nil {
+		return fmt.Errorf("create sorted-kv dir: %w", err)
 	}
-	return fmt.Errorf("IMPORT INTO failed after 3 retries for table %s: %w", table, lastErr)
+
+	lightningBin := "tidb-lightning"
+	if path, err := exec.LookPath("tidb-lightning"); err == nil {
+		lightningBin = path
+		logger.Info("found tidb-lightning binary", zap.String("path", lightningBin))
+	} else {
+		logger.Warn("tidb-lightning not found in PATH, attempting to run", zap.String("binary", lightningBin))
+	}
+
+	configContent := fmt.Sprintf(`[lightning]
+level = "info"
+
+[mydumper]
+data-source-dir = "%s"
+no-schema = true
+
+[mydumper.csv]
+separator = "\t"
+delimiter = ""
+header = false
+not-null = false
+null = "\\N"
+backslash-escape = false
+trim-last-separator = false
+
+[tikv-importer]
+backend = "local"
+sorted-kv-dir = "%s"
+
+[tidb]
+host = "%s"
+port = %d
+user = "%s"
+password = "%s"
+status-port = 10080
+
+[post-restore]
+checksum = "optional"
+analyze = "off"
+`,
+		strings.ReplaceAll(absDir, "\\", "/"),
+		strings.ReplaceAll(sortedKVDir, "\\", "/"),
+		m.cfg.Target.Host,
+		m.cfg.Target.Port,
+		m.cfg.Target.User,
+		m.cfg.Target.Password,
+	)
+
+	if m.cfg.Target.Password == "" {
+		configContent = fmt.Sprintf(`[lightning]
+level = "info"
+
+[mydumper]
+data-source-dir = "%s"
+no-schema = true
+
+[mydumper.csv]
+separator = "\t"
+delimiter = ""
+header = false
+not-null = false
+null = "\\N"
+backslash-escape = false
+trim-last-separator = false
+
+[tikv-importer]
+backend = "local"
+sorted-kv-dir = "%s"
+
+[tidb]
+host = "%s"
+port = %d
+user = "%s"
+status-port = 10080
+
+[post-restore]
+checksum = "optional"
+analyze = "off"
+`,
+			strings.ReplaceAll(absDir, "\\", "/"),
+			strings.ReplaceAll(sortedKVDir, "\\", "/"),
+			m.cfg.Target.Host,
+			m.cfg.Target.Port,
+			m.cfg.Target.User,
+		)
+	}
+
+	configPath := filepath.Join(absDir, "lightning.toml")
+	if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+		return fmt.Errorf("write lightning config: %w", err)
+	}
+	defer os.Remove(configPath)
+
+	logger.Info("generated Lightning config",
+		zap.String("config", configPath),
+		zap.String("data_dir", absDir),
+		zap.String("tidb_host", m.cfg.Target.Host),
+		zap.Int("tidb_port", m.cfg.Target.Port))
+
+	cmd := exec.CommandContext(ctx, lightningBin, "--config", configPath)
+	cmd.Dir = absDir
+	output, err := cmd.CombinedOutput()
+
+	if len(output) > 0 {
+		outputStr := string(output)
+		for _, line := range strings.Split(outputStr, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if strings.Contains(line, "[ERROR]") || strings.Contains(line, "[FATAL]") {
+				logger.Error("lightning: " + line)
+			} else if strings.Contains(line, "[WARN]") {
+				logger.Warn("lightning: " + line)
+			} else {
+				logger.Info("lightning: " + line)
+			}
+		}
+	}
+
+	if err != nil {
+		return fmt.Errorf("tidb-lightning failed: %w\noutput: %s", err, string(output))
+	}
+
+	logger.Info("TiDB Lightning import completed successfully")
+	return nil
 }
 
 func isBadConnection(err error) bool {
