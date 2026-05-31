@@ -321,20 +321,21 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 	logger := zap.L()
 	logger.Info("TiDB Lightning import starting", zap.String("dir", opts.TempDir))
 
-	dsn := m.cfg.Target.DSN()
-	if !strings.Contains(dsn, "writeTimeout=") {
-		dsn += "&writeTimeout=1800s"
-	} else {
-		dsn = strings.Replace(dsn, "writeTimeout=300s", "writeTimeout=1800s", 1)
+	mysqlCfg := mysql.Config{
+		User:                 m.cfg.Target.User,
+		Passwd:               m.cfg.Target.Password,
+		Net:                  "tcp",
+		Addr:                 fmt.Sprintf("%s:%d", m.cfg.Target.Host, m.cfg.Target.Port),
+		DBName:               m.cfg.Target.Database,
+		AllowAllFiles:        true,
+		ParseTime:            true,
+		ReadTimeout:          1800 * time.Second,
+		WriteTimeout:         1800 * time.Second,
+		Timeout:              30 * time.Second,
+		Params:               map[string]string{"charset": "utf8mb4"},
 	}
-	if !strings.Contains(dsn, "readTimeout=") {
-		dsn += "&readTimeout=1800s"
-	} else {
-		dsn = strings.Replace(dsn, "readTimeout=300s", "readTimeout=1800s", 1)
-	}
-	dsn += "&allowLocalInfile=true"
 
-	tidbDB, err := sql.Open("mysql", dsn)
+	tidbDB, err := sql.Open("mysql", mysqlCfg.FormatDSN())
 	if err != nil {
 		return err
 	}
