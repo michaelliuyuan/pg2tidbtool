@@ -407,6 +407,9 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 	if err := os.MkdirAll(sortedKVDir, 0755); err != nil {
 		return fmt.Errorf("create sorted-kv dir: %w", err)
 	}
+	// Clean up old Lightning checkpoints to avoid "illegal checkpoints" errors
+	os.Remove(filepath.Join(sortedKVDir, "tidb_lightning_checkpoint.pb"))
+	os.Remove(filepath.Join(absDir, "tidb_lightning_checkpoint.pb"))
 
 	configContent := fmt.Sprintf(`[lightning]
 level = "info"
