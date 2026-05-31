@@ -11,6 +11,8 @@ import (
 var (
 	extraMu   sync.Mutex
 	extraCore zapcore.Core
+	baseLevel zapcore.Level
+	baseCore  zapcore.Core
 )
 
 func RegisterExtraCore(core zapcore.Core) {
@@ -21,23 +23,40 @@ func RegisterExtraCore(core zapcore.Core) {
 	} else {
 		extraCore = zapcore.NewTee(extraCore, core)
 	}
+	rebuildLogger()
 }
 
 func UnregisterExtraCore() {
 	extraMu.Lock()
 	defer extraMu.Unlock()
 	extraCore = nil
+	rebuildLogger()
+}
+
+func rebuildLogger() {
+	if baseCore == nil {
+		return
+	}
+	var cores []zapcore.Core
+	cores = append(cores, baseCore)
+	if extraCore != nil {
+		cores = append(cores, extraCore)
+	}
+	core := zapcore.NewTee(cores...)
+	logger := zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel))
+	zap.ReplaceGlobals(logger)
 }
 
 func Init(level, format string) error {
 	return InitWithOutput(level, format, "")
 }
 
-func InitWithOutput(level, format, outputPath string) error {
+func InitWithOutput(level, format string, outputPath string) error {
 	var zapLevel zapcore.Level
 	if err := zapLevel.UnmarshalText([]byte(level)); err != nil {
 		zapLevel = zapcore.InfoLevel
 	}
+	baseLevel = zapLevel
 
 	encoderConfig := zap.NewProductionEncoderConfig()
 	encoderConfig.TimeKey = "ts"
@@ -73,15 +92,9 @@ func InitWithOutput(level, format, outputPath string) error {
 		}
 	}
 
-	extraMu.Lock()
-	if extraCore != nil {
-		cores = append(cores, extraCore)
-	}
-	extraMu.Unlock()
+	baseCore = zapcore.NewTee(cores...)
 
-	core := zapcore.NewTee(cores...)
-	logger := zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel))
-	zap.ReplaceGlobals(logger)
+	rebuildLogger()
 
 	return nil
 }
