@@ -345,7 +345,7 @@ function logLevelClass(level: string): string {
                 :key="phase.name"
                 :type="phase.status === 'completed' ? 'success' : phase.status === 'running' ? 'primary' : phase.status === 'failed' ? 'danger' : 'info'"
                 :hollow="phase.status === 'pending'"
-                :timestamp="phase.label"
+                :timestamp="phase.sub_label ? `${phase.label}（${phase.sub_label}）` : phase.label"
                 placement="top"
               >
                 <div style="display: flex; align-items: center; gap: 8px;">

@@ -35,6 +35,7 @@ export interface PhaseInfo {
   name: string
   label: string
   status: string
+  sub_label?: string
   tables: PhaseTableInfo[]
   table_count: number
   tables_done: number

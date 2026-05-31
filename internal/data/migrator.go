@@ -65,7 +65,7 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 	if err != nil {
 		return nil, cerrors.Wrap(cerrors.ErrCheckpointLoad, "init checkpoint", err)
 	}
-	m.cpMgr.SetPhase("data-migration")
+	m.cpMgr.SetPhase("data-export")
 
 	if err := os.MkdirAll(opts.TempDir, 0755); err != nil {
 		return nil, cerrors.Wrap(cerrors.ErrDataExport, "create temp dir", err)
@@ -154,9 +154,10 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 			return nil, firstErr
 		}
 
+		m.cpMgr.SetPhase("data-import")
+		m.cpMgr.ResetAllTables()
 		if err := m.importViaLightning(ctx, opts); err != nil {
 			logger.Warn("LOAD DATA import failed, falling back to streaming INSERT", zap.Error(err))
-			m.cpMgr.ResetAllTables()
 			if err := m.importViaSQL(ctx, opts); err != nil {
 				return nil, cerrors.Wrap(cerrors.ErrDataImport, "sql import", err)
 			}
@@ -320,14 +321,26 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 	logger := zap.L()
 	logger.Info("TiDB Lightning import starting", zap.String("dir", opts.TempDir))
 
-	tidbDB, err := sql.Open("mysql", m.cfg.Target.DSN())
+	dsn := m.cfg.Target.DSN()
+	if !strings.Contains(dsn, "writeTimeout=") {
+		dsn += "&writeTimeout=1800s"
+	} else {
+		dsn = strings.Replace(dsn, "writeTimeout=300s", "writeTimeout=1800s", 1)
+	}
+	if !strings.Contains(dsn, "readTimeout=") {
+		dsn += "&readTimeout=1800s"
+	} else {
+		dsn = strings.Replace(dsn, "readTimeout=300s", "readTimeout=1800s", 1)
+	}
+
+	tidbDB, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return err
 	}
 	defer tidbDB.Close()
 
-	tidbDB.SetConnMaxLifetime(5 * time.Minute)
-	tidbDB.SetConnMaxIdleTime(2 * time.Minute)
+	tidbDB.SetConnMaxLifetime(30 * time.Minute)
+	tidbDB.SetConnMaxIdleTime(10 * time.Minute)
 	tidbDB.SetMaxOpenConns(4)
 
 	if err := tidbDB.PingContext(ctx); err != nil {
@@ -370,35 +383,32 @@ func (m *Migrator) loadCSVToTiDB(ctx context.Context, db *sql.DB, table, csvPath
 	query := fmt.Sprintf("LOAD DATA LOCAL INFILE '%s' INTO TABLE %s FIELDS TERMINATED BY '\\t' LINES TERMINATED BY '\\n'",
 		safePath, quoteMySQL(table))
 
+	logger := zap.L()
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * 2 * time.Second)
+			time.Sleep(time.Duration(attempt) * 3 * time.Second)
 		}
 		conn, err := db.Conn(ctx)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		err = conn.QueryRowContext(ctx, "SELECT 1").Scan(new(int))
-		if err != nil {
-			conn.Close()
-			lastErr = err
-			continue
-		}
 		_, err = conn.ExecContext(ctx, query)
 		conn.Close()
 		if err == nil {
+			logger.Info("LOAD DATA completed", zap.String("table", table))
 			return nil
 		}
 		lastErr = err
-		if !isBadConnection(err) {
-			return err
+		if isBadConnection(err) {
+			logger.Warn("bad connection, retrying LOAD DATA", zap.Int("attempt", attempt+1), zap.String("table", table), zap.Error(err))
+			continue
 		}
-		logger := zap.L()
-		logger.Warn("bad connection, retrying LOAD DATA", zap.Int("attempt", attempt+1), zap.String("table", table))
+		logger.Error("LOAD DATA failed", zap.String("table", table), zap.Error(err))
+		return err
 	}
-	return lastErr
+	return fmt.Errorf("LOAD DATA failed after 3 retries for table %s: %w", table, lastErr)
 }
 
 func isBadConnection(err error) bool {

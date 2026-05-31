@@ -557,7 +557,7 @@ func (s *Server) runMigration(ctx context.Context, taskID string, cfg config.Con
 	// Final progress sync from checkpoint
 	if cpMgr, cpErr := checkpoint.NewManager(cfg.Migration.CheckpointDir); cpErr == nil {
 		cpPhase := cpMgr.GetPhase()
-		if cpPhase == "data-migration" {
+		if cpPhase == "data-migration" || cpPhase == "data-export" || cpPhase == "data-import" {
 			cpPhase = "data"
 		}
 		cpTables := cpMgr.GetAllTables()
@@ -625,7 +625,7 @@ func (s *Server) pollProgress(ctx context.Context, taskID string, checkpointDir 
 			}
 
 			phase := cpMgr.GetPhase()
-			if phase == "data-migration" {
+			if phase == "data-migration" || phase == "data-export" || phase == "data-import" {
 				phase = "data"
 			}
 			tables := cpMgr.GetAllTables()
@@ -894,6 +894,7 @@ func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
 		Name        string                   `json:"name"`
 		Label       string                   `json:"label"`
 		Status      string                   `json:"status"`
+		SubLabel    string                   `json:"sub_label,omitempty"`
 		Tables      []map[string]interface{} `json:"tables,omitempty"`
 		TableCount  int                      `json:"table_count"`
 		TablesDone  int                      `json:"tables_done"`
@@ -941,6 +942,13 @@ func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
 		if p.name == "data" {
 			cpMgr, cpErr := checkpoint.NewManager(fmt.Sprintf(".checkpoint/%s", taskID))
 			if cpErr == nil {
+				cpPhase := cpMgr.GetPhase()
+				switch cpPhase {
+				case "data-export":
+					pi.SubLabel = "数据导出"
+				case "data-import":
+					pi.SubLabel = "数据导入"
+				}
 				tables := cpMgr.GetAllTables()
 				if len(tables) > 0 {
 					for _, tc := range tables {
