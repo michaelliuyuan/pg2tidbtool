@@ -290,7 +290,12 @@ func (m *Migrator) exportTable(ctx context.Context, table string, opts common.Da
 }
 
 func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string, f *os.File, opts common.DataOpts, totalRows *int64) error {
-	query := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
+	// Build SELECT query that converts array columns to JSON
+	selectCols, err := m.buildSelectCols(ctx, schema, table)
+	if err != nil {
+		return fmt.Errorf("build select columns: %w", err)
+	}
+	query := fmt.Sprintf("SELECT %s FROM %s.%s", selectCols, quotePG(schema), quotePG(table))
 	rows, err := m.pgDB.QueryContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("query table: %w", err)
@@ -1069,11 +1074,26 @@ func convertValue(val interface{}) string {
 		}
 		return "0"
 	case []byte:
-		return string(v)
+		s := string(v)
+		// Convert PG array format {1,2,3} to JSON [1,2,3]
+		if len(s) > 1 && s[0] == '{' && s[len(s)-1] == '}' {
+			return pgArrayToJSON(s)
+		}
+		return s
+	case string:
+		// Convert PG array format {1,2,3} to JSON [1,2,3]
+		if len(v) > 1 && v[0] == '{' && v[len(v)-1] == '}' {
+			return pgArrayToJSON(v)
+		}
+		return v
 	case time.Time:
 		return v.Format("2006-01-02 15:04:05.999999")
 	case fmt.Stringer:
-		return v.String()
+		s := v.String()
+		if len(s) > 1 && s[0] == '{' && s[len(s)-1] == '}' {
+			return pgArrayToJSON(s)
+		}
+		return s
 	default:
 		return fmt.Sprintf("%v", v)
 	}
@@ -1094,4 +1114,45 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+func (m *Migrator) buildSelectCols(ctx context.Context, schema, table string) (string, error) {
+	rows, err := m.pgDB.QueryContext(ctx, `
+		SELECT column_name, udt_name
+		FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2
+		ORDER BY ordinal_position`, schema, table)
+	if err != nil {
+		return "*", nil
+	}
+	defer rows.Close()
+
+	type colInfo struct {
+		Name    string
+		UDTName string
+	}
+	var cols []colInfo
+	for rows.Next() {
+		var c colInfo
+		if err := rows.Scan(&c.Name, &c.UDTName); err != nil {
+			return "*", nil
+		}
+		cols = append(cols, c)
+	}
+	if len(cols) == 0 {
+		return "*", nil
+	}
+
+	var selectParts []string
+	for _, c := range cols {
+		if strings.HasPrefix(c.UDTName, "_") {
+			// PostgreSQL array type: convert to JSON
+			selectParts = append(selectParts,
+				fmt.Sprintf("CASE WHEN %s IS NULL THEN NULL ELSE array_to_json(%s)::text END AS %s",
+					quotePG(c.Name), quotePG(c.Name), quotePG(c.Name)))
+		} else {
+			selectParts = append(selectParts, quotePG(c.Name))
+		}
+	}
+	return strings.Join(selectParts, ", "), nil
 }
