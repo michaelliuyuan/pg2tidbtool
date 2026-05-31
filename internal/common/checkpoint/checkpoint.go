@@ -20,15 +20,26 @@ const (
 )
 
 type TableCheckpoint struct {
-	TableName  string    `json:"table_name"`
-	State      State     `json:"state"`
-	RowsDone   int64     `json:"rows_done"`
-	RowsTotal  int64     `json:"rows_total"`
-	BytesDone  int64     `json:"bytes_done"`
-	StartedAt  time.Time `json:"started_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	TableName  string                    `json:"table_name"`
+	State      State                     `json:"state"`
+	RowsDone   int64                     `json:"rows_done"`
+	RowsTotal  int64                     `json:"rows_total"`
+	BytesDone  int64                     `json:"bytes_done"`
+	StartedAt  time.Time                 `json:"started_at"`
+	UpdatedAt  time.Time                 `json:"updated_at"`
+	FinishedAt time.Time                 `json:"finished_at,omitempty"`
+	Error      string                    `json:"error,omitempty"`
+	Chunks     map[int]*ChunkCheckpoint  `json:"chunks,omitempty"`
+}
+
+type ChunkCheckpoint struct {
+	Index     int       `json:"index"`
+	State     State     `json:"state"`
+	RowCount  int64     `json:"row_count"`
+	ByteCount int64     `json:"byte_count"`
+	StartedAt time.Time `json:"started_at,omitempty"`
 	FinishedAt time.Time `json:"finished_at,omitempty"`
-	Error      string    `json:"error,omitempty"`
+	Error     string    `json:"error,omitempty"`
 }
 
 func (tc *TableCheckpoint) Progress() float64 {
@@ -246,4 +257,114 @@ func (m *Manager) Reset() error {
 	m.data.Tables = make(map[string]*TableCheckpoint)
 	m.data.Phase = ""
 	return m.save()
+}
+
+func (m *Manager) IsChunkCompleted(tableName string, chunkIndex int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tc, ok := m.data.Tables[tableName]
+	if !ok || tc.Chunks == nil {
+		return false
+	}
+	chunk, ok := tc.Chunks[chunkIndex]
+	return ok && chunk.State == StateCompleted
+}
+
+func (m *Manager) GetChunkProgress(tableName string, chunkIndex int) (rows, bytes int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tc, ok := m.data.Tables[tableName]
+	if !ok || tc.Chunks == nil {
+		return 0, 0
+	}
+	chunk, ok := tc.Chunks[chunkIndex]
+	if !ok {
+		return 0, 0
+	}
+	return chunk.RowCount, chunk.ByteCount
+}
+
+func (m *Manager) MarkChunkCompleted(tableName string, chunkIndex int, rows, bytes int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tc, ok := m.data.Tables[tableName]
+	if !ok {
+		return fmt.Errorf("table %s not found in checkpoint", tableName)
+	}
+	if tc.Chunks == nil {
+		tc.Chunks = make(map[int]*ChunkCheckpoint)
+	}
+	tc.Chunks[chunkIndex] = &ChunkCheckpoint{
+		Index:     chunkIndex,
+		State:     StateCompleted,
+		RowCount:  rows,
+		ByteCount: bytes,
+		FinishedAt: time.Now(),
+	}
+	return m.save()
+}
+
+func (m *Manager) MarkChunkFailed(tableName string, chunkIndex int, errMsg string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tc, ok := m.data.Tables[tableName]
+	if !ok {
+		return fmt.Errorf("table %s not found in checkpoint", tableName)
+	}
+	if tc.Chunks == nil {
+		tc.Chunks = make(map[int]*ChunkCheckpoint)
+	}
+	tc.Chunks[chunkIndex] = &ChunkCheckpoint{
+		Index:     chunkIndex,
+		State:     StateFailed,
+		Error:     errMsg,
+		FinishedAt: time.Now(),
+	}
+	return m.save()
+}
+
+func (m *Manager) GetPendingChunks(tableName string) []int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tc, ok := m.data.Tables[tableName]
+	if !ok || tc.Chunks == nil {
+		return nil
+	}
+	var pending []int
+	for idx, chunk := range tc.Chunks {
+		if chunk.State != StateCompleted {
+			pending = append(pending, idx)
+		}
+	}
+	return pending
+}
+
+func (m *Manager) InitChunk(tableName string, chunkIndex int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tc, ok := m.data.Tables[tableName]
+	if !ok {
+		return
+	}
+	if tc.Chunks == nil {
+		tc.Chunks = make(map[int]*ChunkCheckpoint)
+	}
+	if _, exists := tc.Chunks[chunkIndex]; !exists {
+		tc.Chunks[chunkIndex] = &ChunkCheckpoint{
+			Index: chunkIndex,
+			State: StatePending,
+		}
+		_ = m.save()
+	}
+}
+
+func (m *Manager) ResetChunks(tableName string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tc, ok := m.data.Tables[tableName]
+	if !ok {
+		return
+	}
+	tc.Chunks = nil
+	_ = m.save()
 }

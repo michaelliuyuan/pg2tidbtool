@@ -27,6 +27,8 @@ import (
 	"go.uber.org/zap"
 )
 
+var chunkFileIndexRegexp = regexp.MustCompile(`^(.+)\.(\d+)$`)
+
 type Migrator struct {
 	cfg       config.Config
 	pgDB      *sql.DB
@@ -113,23 +115,37 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 			m.cpMgr.GetOrCreateTable(table, rowCount)
 			bar := m.display.AddBar(table, rowCount)
 
+			threshold := m.cfg.Migration.LargeTableThreshold
+			if threshold <= 0 {
+				threshold = 1000000
+			}
+
 			sem <- struct{}{}
 			wg.Add(1)
 
-			go func(tableName string, bar *progress.Bar) {
+			go func(tableName string, bar *progress.Bar, rowCount int64) {
 				defer wg.Done()
 				defer func() { <-sem }()
 
 				m.cpMgr.MarkTableRunning(tableName)
 
-				rows, bytes, err := m.exportTable(ctx, tableName, opts)
-				if err != nil {
-					m.cpMgr.MarkTableFailed(tableName, err.Error())
+				var rows int64
+				var bytes int64
+				var exportErr error
+
+				if rowCount > threshold {
+					rows, bytes, exportErr = m.exportTableChunked(ctx, tableName, rowCount, opts)
+				} else {
+					rows, bytes, exportErr = m.exportTable(ctx, tableName, opts)
+				}
+
+				if exportErr != nil {
+					m.cpMgr.MarkTableFailed(tableName, exportErr.Error())
 					m.display.RemoveBar(tableName)
 					errMu.Lock()
 					if firstErr == nil {
 						firstErr = cerrors.WithTable(
-							cerrors.Wrap(cerrors.ErrDataExport, "export table", err),
+							cerrors.Wrap(cerrors.ErrDataExport, "export table", exportErr),
 							tableName)
 					}
 					errMu.Unlock()
@@ -146,7 +162,7 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 					zap.String("table", tableName),
 					zap.Int64("rows", rows),
 					zap.Int64("bytes", bytes))
-			}(table, bar)
+			}(table, bar, rowCount)
 		}
 
 		wg.Wait()
@@ -370,6 +386,8 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 	}
 
 	// Rename CSV files from {table}.csv to {database}.{table}.csv for Lightning file router
+	// Chunked files: {table}.0.csv → {database}.{table}.000.csv
+	// Single files: {table}.csv → {database}.{table}.csv
 	targetDB := m.cfg.Target.Database
 	if targetDB == "" {
 		targetDB = "test"
@@ -379,11 +397,25 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 			continue
 		}
 		// Skip if already has database prefix
-		if strings.Count(entry.Name(), ".") >= 2 {
+		if strings.Count(entry.Name(), ".") >= 3 {
 			continue
 		}
-		tableName := strings.TrimSuffix(entry.Name(), ".csv")
-		newName := targetDB + "." + tableName + ".csv"
+
+		name := entry.Name()
+		baseName := strings.TrimSuffix(name, ".csv")
+
+		var newName string
+		if idx := chunkFileIndexRegexp.FindStringSubmatch(baseName); idx != nil {
+			// Chunked file: {table}.{chunk_index} → {database}.{table}.{chunk_index_padded}.csv
+			tableName := idx[1]
+			chunkIdx := idx[2]
+			newName = fmt.Sprintf("%s.%s.%s.csv", targetDB, tableName, chunkIdx)
+		} else if strings.Count(name, ".") >= 2 {
+			continue
+		} else {
+			// Single file: {table} → {database}.{table}.csv
+			newName = targetDB + "." + baseName + ".csv"
+		}
 		oldPath := filepath.Join(absDir, entry.Name())
 		newPath := filepath.Join(absDir, newName)
 		if err := os.Rename(oldPath, newPath); err != nil {
@@ -1162,4 +1194,293 @@ func (m *Migrator) buildSelectCols(ctx context.Context, schema, table string) (s
 		}
 	}
 	return strings.Join(selectParts, ", "), nil
+}
+
+type ChunkBoundary struct {
+	Index    int
+	MinValue interface{}
+	MaxValue interface{}
+	IsLast   bool
+}
+
+func (m *Migrator) getPrimaryKeyInfo(ctx context.Context, schema, table string) (pkColumn string, pkType string, err error) {
+	query := `
+		SELECT kcu.column_name, c.data_type
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+			ON tc.constraint_name = kcu.constraint_name
+			AND tc.table_schema = kcu.table_schema
+		JOIN information_schema.columns c
+			ON kcu.table_schema = c.table_schema
+			AND kcu.table_name = c.table_name
+			AND kcu.column_name = c.column_name
+		WHERE tc.constraint_type = 'PRIMARY KEY'
+			AND tc.table_schema = $1
+			AND tc.table_name = $2
+		ORDER BY kcu.ordinal_position
+		LIMIT 1
+	`
+	err = m.pgDB.QueryRowContext(ctx, query, schema, table).Scan(&pkColumn, &pkType)
+	if err != nil {
+		return "", "", err
+	}
+	return pkColumn, pkType, nil
+}
+
+func (m *Migrator) calculateChunkBoundaries(
+	ctx context.Context,
+	schema, table, pkColumn string,
+	totalRows, chunkSize int64,
+) ([]ChunkBoundary, error) {
+	logger := zap.L()
+
+	if chunkSize <= 0 {
+		chunkSize = 500000
+	}
+	numChunks := (totalRows + chunkSize - 1) / chunkSize
+	if numChunks < 1 {
+		numChunks = 1
+	}
+
+	var minVal, maxVal int64
+	rangeQuery := fmt.Sprintf("SELECT MIN(%s), MAX(%s) FROM %s.%s",
+		quotePG(pkColumn), quotePG(pkColumn), quotePG(schema), quotePG(table))
+	if err := m.pgDB.QueryRowContext(ctx, rangeQuery).Scan(&minVal, &maxVal); err != nil {
+		logger.Warn("failed to get PK range, falling back to OFFSET/LIMIT",
+			zap.String("table", table), zap.Error(err))
+		return m.calculateChunkBoundariesByOffset(numChunks, chunkSize), nil
+	}
+
+	rangeSize := maxVal - minVal + 1
+	chunkRange := rangeSize / numChunks
+	if chunkRange == 0 {
+		chunkRange = 1
+	}
+
+	var boundaries []ChunkBoundary
+	for i := int64(0); i < numChunks; i++ {
+		bMin := minVal + i*chunkRange
+		bMax := minVal + (i+1)*chunkRange
+		isLast := i == numChunks-1
+		if isLast {
+			bMax = maxVal + 1
+		}
+		boundaries = append(boundaries, ChunkBoundary{
+			Index:    int(i),
+			MinValue: bMin,
+			MaxValue: bMax,
+			IsLast:   isLast,
+		})
+	}
+
+	return boundaries, nil
+}
+
+func (m *Migrator) calculateChunkBoundariesByOffset(numChunks, chunkSize int64) []ChunkBoundary {
+	var boundaries []ChunkBoundary
+	for i := int64(0); i < numChunks; i++ {
+		boundaries = append(boundaries, ChunkBoundary{
+			Index:    int(i),
+			MinValue: i * chunkSize,
+			MaxValue: 0,
+			IsLast:   i == numChunks-1,
+		})
+	}
+	return boundaries
+}
+
+func (m *Migrator) exportChunk(
+	ctx context.Context,
+	schema, table, pkColumn string,
+	boundary ChunkBoundary,
+	chunkFile string,
+	opts common.DataOpts,
+	isOffsetMode bool,
+) (int64, int64, error) {
+	f, err := os.Create(chunkFile)
+	if err != nil {
+		return 0, 0, fmt.Errorf("create chunk file %s: %w", chunkFile, err)
+	}
+	defer f.Close()
+
+	selectCols, err := m.buildSelectCols(ctx, schema, table)
+	if err != nil {
+		return 0, 0, fmt.Errorf("build select columns: %w", err)
+	}
+
+	var query string
+	var rows *sql.Rows
+
+	if isOffsetMode {
+		offset := boundary.MinValue.(int64)
+		if boundary.IsLast {
+			query = fmt.Sprintf("SELECT %s FROM %s.%s ORDER BY ctid LIMIT %d OFFSET %d",
+				selectCols, quotePG(schema), quotePG(table), opts.BatchSize*2, offset)
+		} else {
+			query = fmt.Sprintf("SELECT %s FROM %s.%s ORDER BY ctid LIMIT %d OFFSET %d",
+				selectCols, quotePG(schema), quotePG(table), opts.BatchSize*2, offset)
+		}
+		rows, err = m.pgDB.QueryContext(ctx, query)
+	} else {
+		if boundary.IsLast {
+			query = fmt.Sprintf("SELECT %s FROM %s.%s WHERE %s >= $1 ORDER BY %s",
+				selectCols, quotePG(schema), quotePG(table), quotePG(pkColumn), quotePG(pkColumn))
+			rows, err = m.pgDB.QueryContext(ctx, query, boundary.MinValue)
+		} else {
+			query = fmt.Sprintf("SELECT %s FROM %s.%s WHERE %s >= $1 AND %s < $2 ORDER BY %s",
+				selectCols, quotePG(schema), quotePG(table), quotePG(pkColumn), quotePG(pkColumn), quotePG(pkColumn))
+			rows, err = m.pgDB.QueryContext(ctx, query, boundary.MinValue, boundary.MaxValue)
+		}
+	}
+
+	if err != nil {
+		return 0, 0, fmt.Errorf("query chunk %d: %w", boundary.Index, err)
+	}
+	defer rows.Close()
+
+	cols, err := rows.ColumnTypes()
+	if err != nil {
+		return 0, 0, err
+	}
+	values := make([]interface{}, len(cols))
+	valuePtrs := make([]interface{}, len(cols))
+	for i := range values {
+		valuePtrs[i] = &values[i]
+	}
+
+	var rowCount int64
+	var byteCount int64
+	for rows.Next() {
+		if err := rows.Scan(valuePtrs...); err != nil {
+			return rowCount, byteCount, fmt.Errorf("scan row in chunk %d: %w", boundary.Index, err)
+		}
+		record := make([]string, len(cols))
+		for i, val := range values {
+			record[i] = convertValue(val)
+		}
+		line := strings.Join(record, "\t") + "\n"
+		n, writeErr := f.WriteString(line)
+		if writeErr != nil {
+			return rowCount, byteCount, fmt.Errorf("write row in chunk %d: %w", boundary.Index, writeErr)
+		}
+		byteCount += int64(n)
+		rowCount++
+	}
+
+	return rowCount, byteCount, nil
+}
+
+func (m *Migrator) exportTableChunked(
+	ctx context.Context,
+	table string,
+	rowCount int64,
+	opts common.DataOpts,
+) (int64, int64, error) {
+	logger := zap.L()
+	schema := m.cfg.Source.Schema
+	if schema == "" {
+		schema = "public"
+	}
+
+	pkColumn, pkType, err := m.getPrimaryKeyInfo(ctx, schema, table)
+	if err != nil {
+		logger.Warn("table has no usable primary key, falling back to single file export",
+			zap.String("table", table), zap.Error(err))
+		return m.exportTable(ctx, table, opts)
+	}
+
+	isIntegerPK := pkType == "integer" || pkType == "bigint" || pkType == "smallint" ||
+		pkType == "int" || pkType == "serial" || pkType == "bigserial"
+
+	chunkSize := m.cfg.Migration.ChunkSize
+	if chunkSize <= 0 {
+		chunkSize = 500000
+	}
+
+	var boundaries []ChunkBoundary
+	var isOffsetMode bool
+
+	if isIntegerPK {
+		boundaries, err = m.calculateChunkBoundaries(ctx, schema, table, pkColumn, rowCount, chunkSize)
+		if err != nil {
+			return 0, 0, fmt.Errorf("calculate chunk boundaries for %s: %w", table, err)
+		}
+		isOffsetMode = false
+	} else {
+		numChunks := (rowCount + chunkSize - 1) / chunkSize
+		if numChunks < 1 {
+			numChunks = 1
+		}
+		boundaries = m.calculateChunkBoundariesByOffset(numChunks, chunkSize)
+		isOffsetMode = true
+	}
+
+	logger.Info("exporting table in chunks",
+		zap.String("table", table),
+		zap.Int("chunks", len(boundaries)),
+		zap.String("pk_column", pkColumn),
+		zap.Bool("offset_mode", isOffsetMode))
+
+	for _, b := range boundaries {
+		m.cpMgr.InitChunk(table, b.Index)
+	}
+
+	chunkParallel := m.cfg.Migration.ChunkParallel
+	if chunkParallel <= 0 {
+		chunkParallel = 2
+	}
+
+	var totalRows, totalBytes int64
+	var mu sync.Mutex
+	sem := make(chan struct{}, chunkParallel)
+	var wg sync.WaitGroup
+	var firstErr error
+
+	for _, boundary := range boundaries {
+		if m.cpMgr.IsChunkCompleted(table, boundary.Index) {
+			rows, bytes := m.cpMgr.GetChunkProgress(table, boundary.Index)
+			mu.Lock()
+			totalRows += rows
+			totalBytes += bytes
+			mu.Unlock()
+			continue
+		}
+
+		wg.Add(1)
+		sem <- struct{}{}
+
+		go func(b ChunkBoundary) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			chunkFile := filepath.Join(opts.TempDir, fmt.Sprintf("%s.%d.csv", table, b.Index))
+			rows, bytes, exportErr := m.exportChunk(ctx, schema, table, pkColumn, b, chunkFile, opts, isOffsetMode)
+			if exportErr != nil {
+				m.cpMgr.MarkChunkFailed(table, b.Index, exportErr.Error())
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = exportErr
+				}
+				mu.Unlock()
+				return
+			}
+
+			mu.Lock()
+			totalRows += rows
+			totalBytes += bytes
+			mu.Unlock()
+
+			m.cpMgr.MarkChunkCompleted(table, b.Index, rows, bytes)
+			m.cpMgr.UpdateTableProgress(table, totalRows, totalBytes)
+
+			logger.Info("chunk exported",
+				zap.String("table", table),
+				zap.Int("chunk", b.Index),
+				zap.Int64("rows", rows),
+				zap.Int64("bytes", bytes))
+		}(boundary)
+	}
+
+	wg.Wait()
+	return totalRows, totalBytes, firstErr
 }
