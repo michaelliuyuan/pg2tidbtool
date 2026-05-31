@@ -343,24 +343,12 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 		return fmt.Errorf("get absolute path: %w", err)
 	}
 
-	sortedKVDir := filepath.Join(absDir, ".sorted-kv")
-	if err := os.MkdirAll(sortedKVDir, 0755); err != nil {
-		return fmt.Errorf("create sorted-kv dir: %w", err)
-	}
-
 	lightningBin := "tidb-lightning"
 	if path, err := exec.LookPath("tidb-lightning"); err == nil {
 		lightningBin = path
 		logger.Info("found tidb-lightning binary", zap.String("path", lightningBin))
 	} else {
 		logger.Warn("tidb-lightning not found in PATH, attempting to run", zap.String("binary", lightningBin))
-	}
-
-	// Determine PD address: use configured value, or default to host:2379
-	pdAddr := m.cfg.Target.PDAddr
-	if pdAddr == "" {
-		pdAddr = fmt.Sprintf("%s:2379", m.cfg.Target.Host)
-		logger.Info("pd_addr not configured, defaulting to host:2379", zap.String("pd_addr", pdAddr))
 	}
 
 	configContent := fmt.Sprintf(`[lightning]
@@ -380,27 +368,23 @@ backslash-escape = false
 trim-last-separator = false
 
 [tikv-importer]
-backend = "local"
-sorted-kv-dir = "%s"
+backend = "tidb"
 
 [tidb]
 host = "%s"
 port = %d
 user = "%s"
 password = "%s"
-pd-addr = "%s"
 
 [post-restore]
 checksum = "optional"
 analyze = "off"
 `,
 		strings.ReplaceAll(absDir, "\\", "/"),
-		strings.ReplaceAll(sortedKVDir, "\\", "/"),
 		m.cfg.Target.Host,
 		m.cfg.Target.Port,
 		m.cfg.Target.User,
 		m.cfg.Target.Password,
-		pdAddr,
 	)
 
 	if m.cfg.Target.Password == "" {
@@ -421,25 +405,21 @@ backslash-escape = false
 trim-last-separator = false
 
 [tikv-importer]
-backend = "local"
-sorted-kv-dir = "%s"
+backend = "tidb"
 
 [tidb]
 host = "%s"
 port = %d
 user = "%s"
-pd-addr = "%s"
 
 [post-restore]
 checksum = "optional"
 analyze = "off"
 `,
 			strings.ReplaceAll(absDir, "\\", "/"),
-			strings.ReplaceAll(sortedKVDir, "\\", "/"),
 			m.cfg.Target.Host,
 			m.cfg.Target.Port,
 			m.cfg.Target.User,
-			pdAddr,
 		)
 	}
 
