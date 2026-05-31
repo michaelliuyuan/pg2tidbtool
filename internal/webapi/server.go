@@ -785,7 +785,7 @@ func (s *Server) buildTaskReport(task *store.Task) *reporter.Report {
 	if task.FinishedAt != nil {
 		report.EndTime = *task.FinishedAt
 	}
-	report.Duration = report.EndTime.Sub(report.StartTime).String()
+	report.Duration = reporter.FormatDuration(report.EndTime.Sub(report.StartTime))
 
 	if task.Status == store.TaskStatusCompleted {
 		report.Status = reporter.StatusPass

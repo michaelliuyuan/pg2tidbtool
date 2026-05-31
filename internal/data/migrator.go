@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -204,7 +205,7 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 	duration := time.Since(startTime)
 	result := &common.DataResult{
 		TotalTables: len(tables),
-		Duration:    duration.String(),
+		Duration:    formatDuration(duration),
 		ExportPath:  opts.TempDir,
 	}
 
@@ -369,15 +370,24 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 	}
 
 	hasCSV := false
+	chunkedTables := make(map[string]int)
 	for _, entry := range entries {
 		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".csv") {
 			hasCSV = true
-			break
+			if idx := chunkFileIndexRegexp.FindStringSubmatch(strings.TrimSuffix(entry.Name(), ".csv")); idx != nil {
+				chunkedTables[idx[1]]++
+			}
 		}
 	}
 	if !hasCSV {
 		logger.Warn("no CSV files found in temp dir, skipping Lightning import")
 		return nil
+	}
+
+	for tbl, cnt := range chunkedTables {
+		logger.Info("chunked table detected for Lightning import",
+			zap.String("table", tbl),
+			zap.Int("chunks", cnt))
 	}
 
 	absDir, err := filepath.Abs(opts.TempDir)
@@ -1483,4 +1493,17 @@ func (m *Migrator) exportTableChunked(
 
 	wg.Wait()
 	return totalRows, totalBytes, firstErr
+}
+
+func formatDuration(d time.Duration) string {
+	hours := int(d.Hours())
+	minutes := int(d.Minutes()) % 60
+	seconds := math.Mod(d.Seconds(), 60)
+	if hours > 0 {
+		return fmt.Sprintf("%dh%dm%.3fs", hours, minutes, seconds)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm%.3fs", minutes, seconds)
+	}
+	return fmt.Sprintf("%.3fs", seconds)
 }

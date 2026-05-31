@@ -3,10 +3,24 @@ package reporter
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
 )
+
+func FormatDuration(d time.Duration) string {
+	hours := int(d.Hours())
+	minutes := int(d.Minutes()) % 60
+	seconds := math.Mod(d.Seconds(), 60)
+	if hours > 0 {
+		return fmt.Sprintf("%dh%dm%.3fs", hours, minutes, seconds)
+	}
+	if minutes > 0 {
+		return fmt.Sprintf("%dm%.3fs", minutes, seconds)
+	}
+	return fmt.Sprintf("%.3fs", seconds)
+}
 
 type Status string
 
@@ -68,7 +82,7 @@ func (r *Report) AddTableReport(tr TableReport) {
 
 func (r *Report) Finish(status Status, summary string) {
 	r.EndTime = time.Now()
-	r.Duration = r.EndTime.Sub(r.StartTime).String()
+	r.Duration = FormatDuration(r.EndTime.Sub(r.StartTime))
 	r.Status = status
 	r.Summary = summary
 	r.computeStats()
