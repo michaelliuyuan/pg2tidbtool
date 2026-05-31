@@ -17,6 +17,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	lightningpkg "github.com/pg2tidb/pg2tidb-migrator/internal/lightning"
 
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/checkpoint"
@@ -392,12 +393,9 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 		}
 	}
 
-	lightningBin := "tidb-lightning"
-	if path, err := exec.LookPath("tidb-lightning"); err == nil {
-		lightningBin = path
-		logger.Info("found tidb-lightning binary", zap.String("path", lightningBin))
-	} else {
-		logger.Warn("tidb-lightning not found in PATH, attempting to run", zap.String("binary", lightningBin))
+	lightningBin := lightningpkg.FindBinary(m.cfg.Migration.TempDir)
+	if lightningBin == "" {
+		return fmt.Errorf("tidb-lightning not found: install tidb-lightning or use a build with embedded binary")
 	}
 
 	// Defaults for PD address and status port

@@ -5,10 +5,27 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 BUILD_DIR := build
 
+# Set LIGHTNING_BIN to the path of tidb-lightning binary to embed it.
+# Example: make build-lightning LIGHTNING_BIN=/usr/local/bin/tidb-lightning
+LIGHTNING_BIN ?=
+
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) .
+
+build-lightning:
+ifndef LIGHTNING_BIN
+	$(error LIGHTNING_BIN is not set. Usage: make build-lightning LIGHTNING_BIN=/path/to/tidb-lightning)
+endif
+	@echo "Embedding tidb-lightning from $(LIGHTNING_BIN)..."
+	cp $(LIGHTNING_BIN) internal/lightning/tidb-lightning
+	@echo "Building $(BINARY_NAME) with embedded tidb-lightning..."
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) .
+	@echo "Restoring placeholder..."
+	echo "placeholder" > internal/lightning/tidb-lightning
+	@ls -lh $(BUILD_DIR)/$(BINARY_NAME)
 
 test:
 	go test -v -race -count=1 ./...
@@ -40,5 +57,20 @@ build-web: web-frontend
 	@echo "Building $(BINARY_NAME) with embedded web UI..."
 	@mkdir -p $(BUILD_DIR)
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) .
+
+# Build with both web UI and tidb-lightning embedded
+# Usage: make build-all LIGHTNING_BIN=/path/to/tidb-lightning
+build-all: web-frontend
+ifndef LIGHTNING_BIN
+	$(error LIGHTNING_BIN is not set. Usage: make build-all LIGHTNING_BIN=/path/to/tidb-lightning)
+endif
+	@echo "Embedding tidb-lightning from $(LIGHTNING_BIN)..."
+	cp $(LIGHTNING_BIN) internal/lightning/tidb-lightning
+	@echo "Building $(BINARY_NAME) with embedded web UI + tidb-lightning..."
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) .
+	@echo "Restoring placeholder..."
+	echo "placeholder" > internal/lightning/tidb-lightning
+	@ls -lh $(BUILD_DIR)/$(BINARY_NAME)
 
 all: fmt vet test build

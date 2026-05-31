@@ -76,12 +76,31 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o build/pg2tidb
 GOOS=darwin GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o build/pg2tidb .
 ```
 
-## 3. 安装 tidb-lightning（Lightning 导入模式）
+## 3. 安装 tidb-lightning
 
-如果使用 `use_lightning: true`（默认），需要在运行 pg2tidb 的服务器上安装 `tidb-lightning`：
+pg2tidb 支持两种方式获取 tidb-lightning：
+
+### 方式一：内置模式（推荐，无需手动安装）
+
+构建时将 tidb-lightning 二进制嵌入 pg2tidb，运行时自动释放：
 
 ```bash
-# 下载 TiDB Lightning（示例版本，请根据需要调整）
+# 构建 Web UI + 内置 Lightning
+LIGHTNING_BIN=/path/to/tidb-lightning bash build-web.sh
+
+# 或使用 Make
+make build-all LIGHTNING_BIN=/path/to/tidb-lightning
+
+# Docker 构建会自动下载并内置 tidb-lightning
+docker build -t pg2tidb .
+```
+
+### 方式二：手动安装
+
+如果使用未内置 Lightning 的构建版本：
+
+```bash
+# 下载 TiDB Lightning
 wget https://download.pingcap.org/tidb-toolkit-v7.1.0-linux-amd64.tar.gz
 tar -xzf tidb-toolkit-v7.1.0-linux-amd64.tar.gz
 sudo cp tidb-toolkit-v7.1.0-linux-amd64/bin/tidb-lightning /usr/local/bin/
@@ -90,7 +109,8 @@ sudo cp tidb-toolkit-v7.1.0-linux-amd64/bin/tidb-lightning /usr/local/bin/
 tidb-lightning --version
 ```
 
-> **注意**：如果不安装 tidb-lightning，数据导入会自动回退为流式 INSERT 模式（速度较慢但功能完整）。
+> **优先级**：系统 PATH > 内置二进制 > 自动回退到流式 INSERT
+> 如果都不可用，数据导入会自动回退为流式 INSERT 模式（速度较慢但功能完整）。
 
 ## 4. 配置文件
 
