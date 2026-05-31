@@ -7,8 +7,8 @@ const route = useRoute()
 <template>
   <el-container style="height: 100vh">
     <el-header style="background: #1a1a2e; display: flex; align-items: center; padding: 0 24px;">
-      <div style="color: #fff; font-size: 20px; font-weight: bold; cursor: pointer;" @click="router.push('/')">
-        PG2TiDB
+      <div style="color: #fff; font-size: 20px; font-weight: bold; cursor: pointer; display: flex; align-items: baseline;" @click="router.push('/')">
+        <span style="color: #e23d3d; font-size: 24px; font-weight: 900; margin-right: 4px;">Ti</span><span style="color: #fff;">MS</span>
       </div>
       <el-menu
         :default-active="route.path"

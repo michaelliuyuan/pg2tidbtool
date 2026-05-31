@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -391,6 +392,7 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 
 	configContent := fmt.Sprintf(`[lightning]
 level = "info"
+check-require-table-empty = false
 
 [mydumper]
 data-source-dir = "%s"
@@ -434,6 +436,7 @@ analyze = "off"
 	if m.cfg.Target.Password == "" {
 		configContent = fmt.Sprintf(`[lightning]
 level = "info"
+check-require-table-empty = false
 
 [mydumper]
 data-source-dir = "%s"
@@ -489,8 +492,9 @@ analyze = "off"
 	cmd.Dir = absDir
 	output, err := cmd.CombinedOutput()
 
+	var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	if len(output) > 0 {
-		outputStr := string(output)
+		outputStr := ansiRe.ReplaceAllString(string(output), "")
 		for _, line := range strings.Split(outputStr, "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" {
