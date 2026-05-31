@@ -157,6 +157,19 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 
 		m.cpMgr.SetPhase("data-import")
 		m.cpMgr.ResetAllTables()
+
+		// Apply target policy (truncate/drop) before Lightning import
+		if m.cfg.Migration.TargetPolicy == "truncate" || m.cfg.Migration.TargetPolicy == "drop" {
+			tidbDSN := m.cfg.Target.DSN()
+			tidbDB, err := sql.Open("mysql", tidbDSN)
+			if err == nil {
+				if applyErr := m.applyTargetPolicy(ctx, tidbDB, tables); applyErr != nil {
+					logger.Warn("target policy apply failed", zap.Error(applyErr))
+				}
+				tidbDB.Close()
+			}
+		}
+
 		if err := m.importViaLightning(ctx, opts); err != nil {
 			logger.Warn("LOAD DATA import failed, falling back to streaming INSERT", zap.Error(err))
 			if err := m.importViaSQL(ctx, opts); err != nil {
@@ -392,7 +405,6 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 
 	configContent := fmt.Sprintf(`[lightning]
 level = "info"
-check-require-table-empty = false
 
 [mydumper]
 data-source-dir = "%s"
@@ -436,7 +448,6 @@ analyze = "off"
 	if m.cfg.Target.Password == "" {
 		configContent = fmt.Sprintf(`[lightning]
 level = "info"
-check-require-table-empty = false
 
 [mydumper]
 data-source-dir = "%s"
