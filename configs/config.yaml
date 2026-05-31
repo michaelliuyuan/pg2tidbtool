@@ -13,6 +13,7 @@ target:
   user: "root"
   password: ""
   database: "mydb"
+  pd_addr: "localhost:2379"
 
 migration:
   parallel: 4

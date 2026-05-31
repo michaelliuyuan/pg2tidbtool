@@ -43,6 +43,7 @@ type TargetConfig struct {
 	User     string `yaml:"user"`
 	Password string `yaml:"password"`
 	Database string `yaml:"database"`
+	PDAddr   string `yaml:"pd_addr"`
 }
 
 func (t TargetConfig) DSN() string {
@@ -179,6 +180,9 @@ func LoadWithOverrides(path string, overrides map[string]string) (*Config, error
 	}
 	if v, ok := overrides["target.database"]; ok {
 		cfg.Target.Database = v
+	}
+	if v, ok := overrides["target.pd_addr"]; ok {
+		cfg.Target.PDAddr = v
 	}
 	if v, ok := overrides["migration.parallel"]; ok {
 		fmt.Sscanf(v, "%d", &cfg.Migration.Parallel)

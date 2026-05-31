@@ -356,6 +356,13 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 		logger.Warn("tidb-lightning not found in PATH, attempting to run", zap.String("binary", lightningBin))
 	}
 
+	// Determine PD address: use configured value, or default to host:2379
+	pdAddr := m.cfg.Target.PDAddr
+	if pdAddr == "" {
+		pdAddr = fmt.Sprintf("%s:2379", m.cfg.Target.Host)
+		logger.Info("pd_addr not configured, defaulting to host:2379", zap.String("pd_addr", pdAddr))
+	}
+
 	configContent := fmt.Sprintf(`[lightning]
 level = "info"
 
@@ -381,7 +388,7 @@ host = "%s"
 port = %d
 user = "%s"
 password = "%s"
-status-port = 10080
+pd-addr = "%s"
 
 [post-restore]
 checksum = "optional"
@@ -393,6 +400,7 @@ analyze = "off"
 		m.cfg.Target.Port,
 		m.cfg.Target.User,
 		m.cfg.Target.Password,
+		pdAddr,
 	)
 
 	if m.cfg.Target.Password == "" {
@@ -420,7 +428,7 @@ sorted-kv-dir = "%s"
 host = "%s"
 port = %d
 user = "%s"
-status-port = 10080
+pd-addr = "%s"
 
 [post-restore]
 checksum = "optional"
@@ -431,6 +439,7 @@ analyze = "off"
 			m.cfg.Target.Host,
 			m.cfg.Target.Port,
 			m.cfg.Target.User,
+			pdAddr,
 		)
 	}
 

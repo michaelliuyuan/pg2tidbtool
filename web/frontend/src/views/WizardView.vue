@@ -32,6 +32,7 @@ const form = reactive({
     user: 'root',
     password: '',
     database: '',
+    pd_addr: '',
   },
   opts: {
     parallel: 4,
@@ -344,6 +345,9 @@ function prevStep() {
           </el-form-item>
           <el-form-item label="数据库名" prop="target.database">
             <el-input v-model="form.target.database" />
+          </el-form-item>
+          <el-form-item label="PD 地址">
+            <el-input v-model="form.target.pd_addr" placeholder="host:2379，留空则自动推断" />
           </el-form-item>
           <el-form-item>
             <el-button type="primary" :loading="testingTarget" @click="testConnection('target')">

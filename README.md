@@ -54,6 +54,7 @@ target:
   user: "root"
   password: ""
   database: "mydb"
+  pd_addr: "tidb-host:2379"
 ```
 
 ### 2. 一键迁移
@@ -121,6 +122,7 @@ target:
   user: "root"
   password: ""
   database: "mydb"
+  pd_addr: "localhost:2379"    # PD 地址，使用 Lightning 导入时必填
 
 # 迁移配置
 migration:
@@ -155,6 +157,7 @@ web:
 | `migration.parallel` | 并行导出 worker 数，建议设为 CPU 核数 | 4 |
 | `migration.batch_size` | 每批次迁移行数 | 100000 |
 | `migration.use_lightning` | 使用 Lightning Local Backend 加速导入 | true |
+| `target.pd_addr` | PD 地址（Lightning 导入必填） | host:2379 |
 | `migration.on_error` | 单表失败时 skip 继续或 abort 中止 | abort |
 | `logging.level` | 日志级别 | info |
 | `web.enable` | 启用 Web 监控面板 | false |
