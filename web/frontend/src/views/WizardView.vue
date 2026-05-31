@@ -33,6 +33,7 @@ const form = reactive({
     password: '',
     database: '',
     pd_addr: '',
+    status_port: 10080,
   },
   opts: {
     parallel: 4,
@@ -348,6 +349,9 @@ function prevStep() {
           </el-form-item>
           <el-form-item label="PD 地址">
             <el-input v-model="form.target.pd_addr" placeholder="host:2379，留空则自动推断" />
+          </el-form-item>
+          <el-form-item label="Status 端口">
+            <el-input-number v-model="form.target.status_port" :min="0" :max="65535" placeholder="10080" />
           </el-form-item>
           <el-form-item>
             <el-button type="primary" :loading="testingTarget" @click="testConnection('target')">

@@ -43,7 +43,8 @@ type TargetConfig struct {
 	User     string `yaml:"user" json:"user"`
 	Password string `yaml:"password" json:"password"`
 	Database string `yaml:"database" json:"database"`
-	PDAddr   string `yaml:"pd_addr" json:"pd_addr"`
+	PDAddr     string `yaml:"pd_addr" json:"pd_addr"`
+	StatusPort int    `yaml:"status_port" json:"status_port"`
 }
 
 func (t TargetConfig) DSN() string {

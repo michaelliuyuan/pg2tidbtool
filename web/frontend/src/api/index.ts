@@ -103,6 +103,7 @@ export interface CreateTaskRequest {
     password: string
     database: string
     pd_addr: string
+    status_port: number
   }
   opts: {
     parallel: number
