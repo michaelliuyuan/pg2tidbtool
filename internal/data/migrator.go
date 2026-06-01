@@ -830,14 +830,6 @@ func (m *Migrator) importViaSQL(ctx context.Context, opts common.DataOpts) error
 		return fmt.Errorf("ping TiDB: %w", err)
 	}
 
-	if err := m.applyTargetPolicy(ctx, tidbDB, tables); err != nil {
-		return err
-	}
-
-	if err := m.ensureTablesExist(ctx, tidbDB, schema, tables); err != nil {
-		logger.Warn("some tables may not exist in target", zap.Error(err))
-	}
-
 	batchSize := opts.BatchSize
 	if batchSize <= 0 {
 		batchSize = 5000
