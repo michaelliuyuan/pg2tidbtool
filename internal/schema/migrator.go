@@ -84,18 +84,23 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 	checker := NewTargetChecker(m.cfg)
 
 	if !opts.DryRun && opts.OutputFile == "" {
-		if err := checker.LoadExistingTables(ctx); err != nil {
-			logger.Warn("failed to check existing tables, proceeding without skip", zap.Error(err))
-		}
-		if len(checker.ExistingTables()) > 0 {
-			logger.Info("found existing tables in target", zap.Int("count", len(checker.ExistingTables())))
+		if m.cfg.Migration.TargetPolicy != "truncate" && m.cfg.Migration.TargetPolicy != "drop" {
+			if err := checker.LoadExistingTables(ctx); err != nil {
+				logger.Warn("failed to check existing tables, proceeding without skip", zap.Error(err))
+			}
+			if len(checker.ExistingTables()) > 0 {
+				logger.Info("found existing tables in target", zap.Int("count", len(checker.ExistingTables())))
+			}
+		} else {
+			logger.Info("target policy is " + m.cfg.Migration.TargetPolicy + ", will recreate existing tables")
 		}
 	}
 
 	var deferredFKs []string
 
 	for _, table := range schemaInfo.Tables {
-		if checker.TableExists(table.Name) {
+		policy := m.cfg.Migration.TargetPolicy
+		if checker.TableExists(table.Name) && policy != "truncate" && policy != "drop" {
 			logger.Info("table already exists in target, skipping", zap.String("table", table.Name))
 			builder.statements = append(builder.statements,
 				fmt.Sprintf("-- Table: %s (SKIPPED: already exists in target)", table.Name))
@@ -105,6 +110,11 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 				SourceRows: int64(len(table.Columns)),
 			})
 			continue
+		}
+
+		if checker.TableExists(table.Name) && (policy == "truncate" || policy == "drop") {
+			builder.statements = append(builder.statements,
+				fmt.Sprintf("DROP TABLE IF EXISTS %s", QuoteIdentifier(table.Name)))
 		}
 
 		tableStart := fmt.Sprintf("-- Table: %s", table.Name)
