@@ -180,7 +180,10 @@ func (b *DDLBuilder) JoinSQL() string {
 
 func convertDefaultValue(pgDefault string, pgType PGType) string {
 	d := strings.TrimSpace(pgDefault)
+
 	switch {
+	case d == "", strings.ToUpper(d) == "NULL":
+		return ""
 	case strings.Contains(strings.ToUpper(d), "NEXTVAL"):
 		return ""
 	case strings.Contains(strings.ToUpper(d), "CURRENT_TIMESTAMP"):
@@ -192,26 +195,43 @@ func convertDefaultValue(pgDefault string, pgType PGType) string {
 	}
 
 	if idx := strings.Index(d, "::"); idx > 0 {
-		raw := d[:idx]
-		raw = strings.TrimSpace(raw)
+		raw := strings.TrimSpace(d[:idx])
 		if strings.ToUpper(raw) == "NULL" {
 			return ""
 		}
 		if strings.HasPrefix(raw, "'") && strings.HasSuffix(raw, "'") {
 			return raw
 		}
-		return raw
+		if isSimpleLiteral(raw) {
+			return raw
+		}
+		return ""
 	}
 
 	if strings.HasPrefix(d, "'") && strings.HasSuffix(d, "'") {
 		return d
 	}
 
-	if strings.ToUpper(d) == "NULL" {
-		return ""
+	if isSimpleLiteral(d) {
+		return d
 	}
 
-	return d
+	return ""
+}
+
+func isSimpleLiteral(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9':
+		case c == '.' || c == '-' || c == '+':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func escapeSQLString(s string) string {

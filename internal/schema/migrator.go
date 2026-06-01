@@ -119,6 +119,7 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 			})
 			continue
 		}
+		logger.Info("built table DDL", zap.String("table", table.Name), zap.String("ddl", builder.statements[len(builder.statements)-1]))
 
 		builder.BuildPrimaryKeyDDL(table)
 
@@ -176,7 +177,9 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 	}
 
 	if !opts.DryRun && opts.OutputFile == "" {
+		zap.L().Info("executing DDL on TiDB", zap.Int("statements", len(builder.Statements())))
 		if err := m.executeDDL(ctx, sql); err != nil {
+			zap.L().Error("DDL execution failed, full SQL", zap.String("ddl", truncate(sql, 5000)))
 			return cerrors.Wrap(cerrors.ErrSchemaApply, "execute DDL", err)
 		}
 		logger.Info("DDL executed on TiDB")
