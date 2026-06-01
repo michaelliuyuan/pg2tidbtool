@@ -447,8 +447,8 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts,
 	os.Remove(filepath.Join(sortedKVDir, "tidb_lightning_checkpoint.pb"))
 	os.Remove(filepath.Join(absDir, "tidb_lightning_checkpoint.pb"))
 
-	// Apply target policy before Lightning import
-	if m.cfg.Migration.TargetPolicy == "truncate" || m.cfg.Migration.TargetPolicy == "drop" {
+	// Apply target policy before Lightning import (only truncate; drop is handled by schema migration)
+	if m.cfg.Migration.TargetPolicy == "truncate" {
 		logger.Info("applying target policy before Lightning import",
 			zap.String("policy", m.cfg.Migration.TargetPolicy),
 			zap.Int("tables", len(tables)))
