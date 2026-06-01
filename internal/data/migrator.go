@@ -655,8 +655,8 @@ func (m *Migrator) applyTargetPolicy(ctx context.Context, tidbDB *sql.DB, tables
 				}
 			}
 		case "drop":
-			logger.Info("dropping table", zap.String("table", table))
-			_, err := tidbDB.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s.%s", quoteMySQL(targetDB), quoteMySQL(table)))
+			logger.Info("truncating table (drop policy maps to truncate in data phase)", zap.String("table", table))
+			_, err := tidbDB.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s", quoteMySQL(targetDB), quoteMySQL(table)))
 			if err != nil {
 				logger.Warn("drop failed", zap.String("table", table), zap.Error(err))
 				if firstErr == nil {
