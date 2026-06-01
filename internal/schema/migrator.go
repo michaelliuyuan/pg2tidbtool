@@ -208,6 +208,7 @@ func (m *Migrator) executeDDL(ctx context.Context, ddl string) error {
 	defer tidbDB.Close()
 
 	statements := strings.Split(ddl, ";")
+	executed := 0
 	for _, stmt := range statements {
 		stmt = strings.TrimSpace(stmt)
 		if stmt == "" {
@@ -228,12 +229,15 @@ func (m *Migrator) executeDDL(ctx context.Context, ddl string) error {
 		if _, err := tidbDB.ExecContext(ctx, stmt); err != nil {
 			zap.L().Error("DDL statement failed",
 				zap.Error(err),
+				zap.Int("executed_so_far", executed),
 				zap.String("stmt", stmt))
 			if m.cfg.Migration.OnError != "skip" {
 				return fmt.Errorf("execute DDL: %w", err)
 			}
 		}
+		executed++
 	}
+	zap.L().Info("DDL execution completed", zap.Int("statements_executed", executed))
 	return nil
 }
 

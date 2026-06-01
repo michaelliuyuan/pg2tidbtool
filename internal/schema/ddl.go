@@ -3,8 +3,6 @@ package schema
 import (
 	"fmt"
 	"strings"
-
-	"go.uber.org/zap"
 )
 
 type DDLBuilder struct {
@@ -25,37 +23,17 @@ func (b *DDLBuilder) BuildTableDDL(table TableInfo) error {
 		cols = append(cols, colDDL)
 	}
 
-	ddl := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)",
-		QuoteIdentifier(table.Name),
-		strings.Join(cols, ",\n  "))
+	var tableSuffix string
+	if table.Comment != "" {
+		tableSuffix = fmt.Sprintf(" COMMENT '%s'", escapeSQLString(table.Comment))
+	}
 
-	zap.L().Info("generated CREATE TABLE DDL", zap.String("table", table.Name), zap.String("ddl", ddl))
+	ddl := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)%s",
+		QuoteIdentifier(table.Name),
+		strings.Join(cols, ",\n  "),
+		tableSuffix)
 
 	b.statements = append(b.statements, ddl)
-
-	if table.Comment != "" {
-		b.statements = append(b.statements, fmt.Sprintf(
-			"ALTER TABLE %s COMMENT = '%s'",
-			QuoteIdentifier(table.Name),
-			escapeSQLString(table.Comment),
-		))
-	}
-
-	for _, col := range table.Columns {
-		if col.Comment != "" {
-			mysqlType := MapTypeWithPrecision(col.PGType, col.MaxLength, col.NumericScale)
-			if mysqlType == "" {
-				mysqlType = "TEXT"
-			}
-			b.statements = append(b.statements, fmt.Sprintf(
-				"ALTER TABLE %s MODIFY COLUMN %s %s COMMENT '%s'",
-				QuoteIdentifier(table.Name),
-				QuoteIdentifier(col.ColumnName),
-				mysqlType,
-				escapeSQLString(col.Comment),
-			))
-		}
-	}
 
 	return nil
 }
@@ -88,6 +66,10 @@ func (b *DDLBuilder) buildColumnDDL(col Column) (string, error) {
 		if def != "" {
 			parts = append(parts, "DEFAULT "+def)
 		}
+	}
+
+	if col.Comment != "" {
+		parts = append(parts, fmt.Sprintf("COMMENT '%s'", escapeSQLString(col.Comment)))
 	}
 
 	return strings.Join(parts, " "), nil
