@@ -168,16 +168,23 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 		}
 
 		wg.Wait()
+		logger.Info("[DEBUG] all table exports finished, stopping display")
 		m.display.Stop()
+		logger.Info("[DEBUG] display stopped, flushing checkpoint")
 		m.cpMgr.Flush()
+		logger.Info("[DEBUG] checkpoint flushed")
 
 		if firstErr != nil && m.cfg.Migration.OnError != "skip" {
 			return nil, firstErr
 		}
 
+		logger.Info("[DEBUG] setting phase to data-import")
 		m.cpMgr.SetPhase("data-import")
+		logger.Info("[DEBUG] resetting all tables")
 		m.cpMgr.ResetAllTables()
+		logger.Info("[DEBUG] flushing checkpoint again")
 		m.cpMgr.Flush()
+		logger.Info("[DEBUG] starting Lightning import")
 
 		if err := m.importViaLightning(ctx, opts, tables); err != nil {
 			logger.Warn("LOAD DATA import failed, falling back to streaming INSERT", zap.Error(err))

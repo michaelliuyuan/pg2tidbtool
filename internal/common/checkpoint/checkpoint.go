@@ -66,10 +66,6 @@ type Manager struct {
 	dir      string
 	filePath string
 	data     *Checkpoint
-
-	saveMu sync.Mutex
-	dirty  bool
-	saveCh chan struct{}
 }
 
 func NewManager(dir string) (*Manager, error) {
@@ -86,12 +82,10 @@ func NewManager(dir string) (*Manager, error) {
 			UpdatedAt: time.Now(),
 			Tables:    make(map[string]*TableCheckpoint),
 		},
-		saveCh: make(chan struct{}, 1),
 	}
 	if err := m.load(); err != nil {
 		return nil, err
 	}
-	go m.asyncSaver()
 	return m, nil
 }
 
@@ -116,68 +110,6 @@ func NewReadOnlyManager(dir string) (*Manager, error) {
 	return m, nil
 }
 
-func (m *Manager) asyncSaver() {
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-m.saveCh:
-			m.doSave()
-		case <-ticker.C:
-			m.doSave()
-		}
-	}
-}
-
-func (m *Manager) doSave() {
-	m.saveMu.Lock()
-	defer m.saveMu.Unlock()
-	if !m.dirty {
-		return
-	}
-	m.mu.Lock()
-	m.data.UpdatedAt = time.Now()
-	data, err := json.MarshalIndent(m.data, "", "  ")
-	m.mu.Unlock()
-	if err != nil {
-		return
-	}
-	tmp := m.filePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return
-	}
-	if err := os.Rename(tmp, m.filePath); err != nil {
-		return
-	}
-	m.dirty = false
-}
-
-func (m *Manager) markDirty() {
-	m.dirty = true
-	select {
-	case m.saveCh <- struct{}{}:
-	default:
-	}
-}
-
-func (m *Manager) Flush() {
-	m.saveMu.Lock()
-	defer m.saveMu.Unlock()
-	m.mu.Lock()
-	m.data.UpdatedAt = time.Now()
-	data, err := json.MarshalIndent(m.data, "", "  ")
-	m.mu.Unlock()
-	if err != nil {
-		return
-	}
-	tmp := m.filePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, m.filePath)
-	m.dirty = false
-}
-
 func (m *Manager) load() error {
 	data, err := os.ReadFile(m.filePath)
 	if err != nil {
@@ -187,6 +119,25 @@ func (m *Manager) load() error {
 		return fmt.Errorf("read checkpoint: %w", err)
 	}
 	return json.Unmarshal(data, m.data)
+}
+
+func (m *Manager) save() {
+	m.data.UpdatedAt = time.Now()
+	data, err := json.MarshalIndent(m.data, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := m.filePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, m.filePath)
+}
+
+func (m *Manager) Flush() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.save()
 }
 
 func (m *Manager) GetOrCreateTable(tableName string, totalRows int64) *TableCheckpoint {
@@ -202,7 +153,6 @@ func (m *Manager) GetOrCreateTable(tableName string, totalRows int64) *TableChec
 		RowsTotal: totalRows,
 	}
 	m.data.Tables[tableName] = tc
-	m.markDirty()
 	return tc
 }
 
@@ -215,7 +165,6 @@ func (m *Manager) UpdateTable(tableName string, fn func(tc *TableCheckpoint)) er
 		return fmt.Errorf("table %s not found in checkpoint", tableName)
 	}
 	fn(tc)
-	m.markDirty()
 	return nil
 }
 
@@ -258,9 +207,8 @@ func (m *Manager) GetPhase() string {
 func (m *Manager) SetPhase(phase string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_ = m.load()
 	m.data.Phase = phase
-	m.markDirty()
+	m.save()
 	return nil
 }
 
@@ -308,7 +256,7 @@ func (m *Manager) ResetAllTables() {
 		tc.RowsDone = 0
 		tc.BytesDone = 0
 	}
-	m.markDirty()
+	m.save()
 }
 
 func (m *Manager) Summary() (completed, failed, pending, running int) {
@@ -334,7 +282,7 @@ func (m *Manager) Reset() error {
 	defer m.mu.Unlock()
 	m.data.Tables = make(map[string]*TableCheckpoint)
 	m.data.Phase = ""
-	m.markDirty()
+	m.save()
 	return nil
 }
 
@@ -380,7 +328,6 @@ func (m *Manager) MarkChunkCompleted(tableName string, chunkIndex int, rows, byt
 		ByteCount:  bytes,
 		FinishedAt: time.Now(),
 	}
-	m.markDirty()
 	return nil
 }
 
@@ -400,7 +347,6 @@ func (m *Manager) MarkChunkFailed(tableName string, chunkIndex int, errMsg strin
 		Error:      errMsg,
 		FinishedAt: time.Now(),
 	}
-	m.markDirty()
 	return nil
 }
 
@@ -435,7 +381,6 @@ func (m *Manager) InitChunk(tableName string, chunkIndex int) {
 			Index: chunkIndex,
 			State: StatePending,
 		}
-		m.markDirty()
 	}
 }
 
@@ -447,5 +392,4 @@ func (m *Manager) ResetChunks(tableName string) {
 		return
 	}
 	tc.Chunks = nil
-	m.markDirty()
 }
