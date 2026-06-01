@@ -188,6 +188,10 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 				m.cpMgr.MarkTableCompleted(table, tc.RowsTotal)
 			}
 			m.cpMgr.Flush()
+			logger.Info("[DEBUG] Lightning completed, checkpoint flushed",
+				zap.Int64("total_rows", totalRows.Load()),
+				zap.Int64("total_bytes", totalBytes.Load()),
+				zap.Int("tables", len(tables)))
 		}
 	}
 
@@ -616,7 +620,13 @@ analyze = "off"
 			logger.Error("lightning: " + line)
 		} else if strings.Contains(line, "[WARN]") {
 			logger.Warn("lightning: " + line)
-		} else {
+		} else if strings.Contains(line, "restore table") ||
+			strings.Contains(line, "checksum") ||
+			strings.Contains(line, "restore all tables") ||
+			strings.Contains(line, "exit") ||
+			strings.Contains(line, "import") ||
+			strings.Contains(line, "total") ||
+			strings.Contains(line, "encode") {
 			logger.Info("lightning: " + line)
 		}
 	}

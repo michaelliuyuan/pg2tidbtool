@@ -583,6 +583,12 @@ func (s *Server) runMigration(ctx context.Context, taskID string, cfg config.Con
 				tDone++
 			}
 		}
+		zap.L().Info("[DEBUG] final progress sync",
+			zap.String("phase", cpPhase),
+			zap.Int("tables_total", tTotal),
+			zap.Int("tables_done", tDone),
+			zap.Int64("rows_total", rTotal),
+			zap.Int64("rows_done", rDone))
 		var prog float64
 		if rTotal > 0 {
 			prog = float64(rDone) / float64(rTotal)
