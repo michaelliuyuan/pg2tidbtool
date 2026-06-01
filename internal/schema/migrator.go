@@ -117,7 +117,10 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 			continue
 		}
 
-		if checker.TableExists(table.Name) && (policy == "truncate" || policy == "drop") {
+		if policy == "drop" {
+			builder.statements = append(builder.statements,
+				fmt.Sprintf("DROP TABLE IF EXISTS %s", QuoteIdentifier(table.Name)))
+		} else if checker.TableExists(table.Name) && policy == "truncate" {
 			builder.statements = append(builder.statements,
 				fmt.Sprintf("DROP TABLE IF EXISTS %s", QuoteIdentifier(table.Name)))
 		}
