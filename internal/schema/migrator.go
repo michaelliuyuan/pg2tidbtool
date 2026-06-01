@@ -129,7 +129,7 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 		builder.statements = append(builder.statements, tableStart)
 
 		if err := builder.BuildTableDDL(table); err != nil {
-			logger.Error("failed to build table DDL", zap.String("table", table.Name), zap.Error(err))
+			logger.Error(fmt.Sprintf("failed to build table DDL: %s", table.Name), zap.Error(err))
 			rpt.AddTableReport(reporter.TableReport{
 				TableName: table.Name,
 				Status:    reporter.StatusFail,
@@ -137,7 +137,7 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 			})
 			continue
 		}
-		logger.Info("built table DDL", zap.String("table", table.Name), zap.String("ddl", builder.statements[len(builder.statements)-1]))
+		logger.Info(fmt.Sprintf("built table DDL: %s", table.Name))
 
 		for _, idx := range table.Indexes {
 			if idx.IsPrimary {
@@ -230,6 +230,7 @@ func (m *Migrator) executeDDL(ctx context.Context, ddl string) error {
 
 	statements := strings.Split(ddl, ";")
 	executed := 0
+	failed := 0
 	for _, stmt := range statements {
 		stmt = strings.TrimSpace(stmt)
 		if stmt == "" {
@@ -247,19 +248,51 @@ func (m *Migrator) executeDDL(ctx context.Context, ddl string) error {
 		if allComments {
 			continue
 		}
+
+		objectName := extractObjectName(stmt)
 		if _, err := tidbDB.ExecContext(ctx, stmt); err != nil {
-			zap.L().Error("DDL statement failed",
-				zap.Error(err),
-				zap.Int("executed_so_far", executed),
-				zap.String("stmt", stmt))
+			failed++
+			zap.L().Error(fmt.Sprintf("DDL failed: %s", objectName), zap.Error(err))
 			if m.cfg.Migration.OnError != "skip" {
 				return fmt.Errorf("execute DDL: %w", err)
+			}
+		} else {
+			if objectName != "" {
+				zap.L().Info(fmt.Sprintf("DDL OK: %s", objectName))
 			}
 		}
 		executed++
 	}
-	zap.L().Info("DDL execution completed", zap.Int("statements_executed", executed))
+	zap.L().Info(fmt.Sprintf("DDL execution completed: %d executed, %d failed", executed, failed))
 	return nil
+}
+
+func extractObjectName(stmt string) string {
+	upper := strings.ToUpper(stmt)
+	if strings.HasPrefix(upper, "SET ") {
+		return ""
+	}
+	if strings.HasPrefix(upper, "DROP TABLE") {
+		parts := strings.Fields(stmt)
+		if len(parts) >= 3 {
+			return strings.Trim(parts[len(parts)-1], "`;")
+		}
+	}
+	if strings.HasPrefix(upper, "CREATE TABLE") {
+		parts := strings.Fields(stmt)
+		for i, p := range parts {
+			if (strings.ToUpper(p) == "EXISTS" || strings.ToUpper(p) == "TABLE") && i+1 < len(parts) {
+				return strings.Trim(parts[i+1], "`(")
+			}
+		}
+	}
+	if strings.HasPrefix(upper, "CREATE") || strings.HasPrefix(upper, "ALTER") {
+		parts := strings.Fields(stmt)
+		if len(parts) >= 3 {
+			return strings.Trim(parts[2], "`")
+		}
+	}
+	return ""
 }
 
 func (m *Migrator) writeUnsupportedLog(objects []Object) {
