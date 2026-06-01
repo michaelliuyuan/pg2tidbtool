@@ -459,13 +459,23 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts,
 	os.Remove(filepath.Join(sortedKVDir, "tidb_lightning_checkpoint.pb"))
 	os.Remove(filepath.Join(absDir, "tidb_lightning_checkpoint.pb"))
 
-	var filterSection string
-	if len(tables) > 0 {
-		var filterRules []string
-		for _, t := range tables {
-			filterRules = append(filterRules, fmt.Sprintf(`"%s.%s"`, targetDB, t))
+	tableSet := make(map[string]bool, len(tables))
+	for _, t := range tables {
+		tableSet[t] = true
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".csv") {
+			continue
 		}
-		filterSection = "\n[filter]\n" + fmt.Sprintf("import = [%s]\n", strings.Join(filterRules, ", "))
+		baseName := strings.TrimSuffix(entry.Name(), ".csv")
+		if idx := chunkFileIndexRegexp.FindStringSubmatch(baseName); idx != nil {
+			baseName = idx[1]
+		}
+		if _, ok := tableSet[baseName]; !ok {
+			removePath := filepath.Join(absDir, entry.Name())
+			logger.Info("removing CSV for non-selected table", zap.String("file", entry.Name()), zap.String("table", baseName))
+			os.Remove(removePath)
+		}
 	}
 
 	configContent := fmt.Sprintf(`[lightning]
@@ -495,7 +505,7 @@ user = "%s"
 password = "%s"
 status-port = %d
 pd-addr = "%s"
-%s
+
 [post-restore]
 checksum = "optional"
 analyze = "off"
@@ -508,7 +518,6 @@ analyze = "off"
 		m.cfg.Target.Password,
 		statusPort,
 		pdAddr,
-		filterSection,
 	)
 
 	if m.cfg.Target.Password == "" {
@@ -538,7 +547,7 @@ port = %d
 user = "%s"
 status-port = %d
 pd-addr = "%s"
-%s
+
 [post-restore]
 checksum = "optional"
 analyze = "off"
@@ -550,7 +559,6 @@ analyze = "off"
 			m.cfg.Target.User,
 			statusPort,
 			pdAddr,
-			filterSection,
 		)
 	}
 
