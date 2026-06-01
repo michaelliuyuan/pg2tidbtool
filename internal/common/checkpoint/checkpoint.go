@@ -67,11 +67,9 @@ type Manager struct {
 	filePath string
 	data     *Checkpoint
 
-	saveMu    sync.Mutex
-	dirty     bool
-	saveCh    chan struct{}
-	saveDone  chan struct{}
-	flushSync bool
+	saveMu sync.Mutex
+	dirty  bool
+	saveCh chan struct{}
 }
 
 func NewManager(dir string) (*Manager, error) {
@@ -89,7 +87,6 @@ func NewManager(dir string) (*Manager, error) {
 			Tables:    make(map[string]*TableCheckpoint),
 		},
 		saveCh:   make(chan struct{}, 1),
-		saveDone: make(chan struct{}),
 	}
 	if err := m.load(); err != nil {
 		return nil, err
@@ -104,11 +101,6 @@ func (m *Manager) asyncSaver() {
 	for {
 		select {
 		case <-m.saveCh:
-			if m.flushSync {
-				m.doSaveLocked()
-				m.saveDone <- struct{}{}
-				return
-			}
 			m.doSave()
 		case <-ticker.C:
 			m.doSave()
@@ -139,24 +131,6 @@ func (m *Manager) doSave() {
 	m.dirty = false
 }
 
-func (m *Manager) doSaveLocked() {
-	m.saveMu.Lock()
-	defer m.saveMu.Unlock()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.data.UpdatedAt = time.Now()
-	data, err := json.MarshalIndent(m.data, "", "  ")
-	if err != nil {
-		return
-	}
-	tmp := m.filePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return
-	}
-	_ = os.Rename(tmp, m.filePath)
-	m.dirty = false
-}
-
 func (m *Manager) markDirty() {
 	m.dirty = true
 	select {
@@ -167,10 +141,18 @@ func (m *Manager) markDirty() {
 
 func (m *Manager) Flush() {
 	m.mu.Lock()
-	m.flushSync = true
-	m.markDirty()
+	m.data.UpdatedAt = time.Now()
+	data, err := json.MarshalIndent(m.data, "", "  ")
 	m.mu.Unlock()
-	<-m.saveDone
+	if err != nil {
+		return
+	}
+	tmp := m.filePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, m.filePath)
+	m.dirty = false
 }
 
 func (m *Manager) load() error {
