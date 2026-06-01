@@ -487,7 +487,7 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts,
 
 	configContent := fmt.Sprintf(`[lightning]
 	level = "info"
-check-requirements = off
+check-requirements = false
 
 [mydumper]
 data-source-dir = "%s"
@@ -531,7 +531,7 @@ analyze = "off"
 	if m.cfg.Target.Password == "" {
 		configContent = fmt.Sprintf(`[lightning]
 level = "info"
-check-requirements = off
+check-requirements = false
 
 [mydumper]
 data-source-dir = "%s"
