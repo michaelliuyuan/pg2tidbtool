@@ -7,6 +7,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -250,22 +251,62 @@ func (m *Migrator) executeDDL(ctx context.Context, ddl string) error {
 			continue
 		}
 
+		action := extractDDLAction(stmt)
 		objectName := extractObjectName(stmt)
-		if _, err := tidbDB.ExecContext(ctx, stmt); err != nil {
-			failed++
-			zap.L().Error(fmt.Sprintf("DDL failed: %s", objectName), zap.Error(err))
-			if m.cfg.Migration.OnError != "skip" {
-				return fmt.Errorf("execute DDL: %w", err)
+		label := action
+		if objectName != "" {
+			label = fmt.Sprintf("%s %s", action, objectName)
+		}
+
+		var lastErr error
+		maxRetries := 3
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			if _, err := tidbDB.ExecContext(ctx, stmt); err != nil {
+				lastErr = err
+				if attempt < maxRetries {
+					zap.L().Warn(fmt.Sprintf("DDL %s failed (attempt %d/%d), retrying...", label, attempt, maxRetries), zap.Error(err))
+					time.Sleep(time.Duration(attempt) * time.Second)
+					continue
+				}
+				failed++
+				zap.L().Error(fmt.Sprintf("DDL failed: %s (after %d attempts)", label, maxRetries), zap.Error(err))
+				zap.L().Error(fmt.Sprintf("Failed DDL: %s", truncate(stmt, 500)))
+				if m.cfg.Migration.OnError != "skip" {
+					return fmt.Errorf("execute DDL: %w", err)
+				}
+			} else {
+				lastErr = nil
+				zap.L().Info(fmt.Sprintf("DDL OK: %s", label))
+				break
 			}
-		} else {
-			if objectName != "" {
-				zap.L().Info(fmt.Sprintf("DDL OK: %s", objectName))
-			}
+		}
+		if lastErr != nil {
+			_ = lastErr
 		}
 		executed++
 	}
 	zap.L().Info(fmt.Sprintf("DDL execution completed: %d executed, %d failed", executed, failed))
 	return nil
+}
+
+func extractDDLAction(stmt string) string {
+	upper := strings.ToUpper(strings.TrimSpace(stmt))
+	switch {
+	case strings.HasPrefix(upper, "DROP TABLE"):
+		return "DROP TABLE"
+	case strings.HasPrefix(upper, "CREATE TABLE"):
+		return "CREATE TABLE"
+	case strings.HasPrefix(upper, "CREATE UNIQUE INDEX"):
+		return "CREATE UNIQUE INDEX"
+	case strings.HasPrefix(upper, "CREATE INDEX"):
+		return "CREATE INDEX"
+	case strings.HasPrefix(upper, "ALTER TABLE"):
+		return "ALTER TABLE"
+	case strings.HasPrefix(upper, "SET "):
+		return "SET"
+	default:
+		return "DDL"
+	}
 }
 
 func extractObjectName(stmt string) string {
