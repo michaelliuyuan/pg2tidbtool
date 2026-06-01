@@ -86,12 +86,33 @@ func NewManager(dir string) (*Manager, error) {
 			UpdatedAt: time.Now(),
 			Tables:    make(map[string]*TableCheckpoint),
 		},
-		saveCh:   make(chan struct{}, 1),
+		saveCh: make(chan struct{}, 1),
 	}
 	if err := m.load(); err != nil {
 		return nil, err
 	}
 	go m.asyncSaver()
+	return m, nil
+}
+
+func NewReadOnlyManager(dir string) (*Manager, error) {
+	fp := filepath.Join(dir, "checkpoint.json")
+	m := &Manager{
+		dir:      dir,
+		filePath: fp,
+		data: &Checkpoint{
+			Version:   "1.0",
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+			Tables:    make(map[string]*TableCheckpoint),
+		},
+	}
+	if err := m.load(); err != nil {
+		if os.IsNotExist(err) {
+			return m, nil
+		}
+		return nil, err
+	}
 	return m, nil
 }
 
@@ -140,6 +161,8 @@ func (m *Manager) markDirty() {
 }
 
 func (m *Manager) Flush() {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
 	m.mu.Lock()
 	m.data.UpdatedAt = time.Now()
 	data, err := json.MarshalIndent(m.data, "", "  ")

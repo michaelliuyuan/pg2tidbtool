@@ -567,7 +567,7 @@ func (s *Server) runMigration(ctx context.Context, taskID string, cfg config.Con
 	}
 
 	// Final progress sync from checkpoint
-	if cpMgr, cpErr := checkpoint.NewManager(cfg.Migration.CheckpointDir); cpErr == nil {
+	if cpMgr, cpErr := checkpoint.NewReadOnlyManager(cfg.Migration.CheckpointDir); cpErr == nil {
 		cpPhase := cpMgr.GetPhase()
 		if cpPhase == "data-migration" || cpPhase == "data-export" || cpPhase == "data-import" {
 			cpPhase = "data"
@@ -631,7 +631,7 @@ func (s *Server) pollProgress(ctx context.Context, taskID string, checkpointDir 
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			cpMgr, err := checkpoint.NewManager(checkpointDir)
+			cpMgr, err := checkpoint.NewReadOnlyManager(checkpointDir)
 			if err != nil {
 				continue
 			}
@@ -815,7 +815,7 @@ func (s *Server) buildTaskReport(task *store.Task) *reporter.Report {
 	if cpDir == "" {
 		cpDir = fmt.Sprintf(".checkpoint/%s", task.ID)
 	}
-	if cpMgr, err := checkpoint.NewManager(cpDir); err == nil {
+	if cpMgr, err := checkpoint.NewReadOnlyManager(cpDir); err == nil {
 		for _, tc := range cpMgr.GetAllTables() {
 			tr := reporter.TableReport{
 				TableName:  tc.TableName,
@@ -1021,7 +1021,7 @@ func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if p.name == "data" {
-			cpMgr, cpErr := checkpoint.NewManager(fmt.Sprintf(".checkpoint/%s", taskID))
+			cpMgr, cpErr := checkpoint.NewReadOnlyManager(fmt.Sprintf(".checkpoint/%s", taskID))
 			if cpErr == nil {
 				cpPhase := cpMgr.GetPhase()
 				switch cpPhase {
