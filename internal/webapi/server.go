@@ -543,12 +543,14 @@ func (s *Server) runMigration(ctx context.Context, taskID string, cfg config.Con
 	go s.pollProgress(progressCtx, taskID, cfg.Migration.CheckpointDir)
 
 	o := orchestrator.NewOrchestrator(cfg)
-	results, err := o.Run(ctx, orchestrator.PipelineConfig{
+	pipeCfg := orchestrator.PipelineConfig{
 		SkipPrecheck: cfg.Migration.SkipPrecheck,
 		SkipSchema:   cfg.Migration.SkipSchema,
 		SkipData:     cfg.Migration.SkipData,
 		SkipValidate: cfg.Migration.SkipValidate,
-	})
+	}
+
+	results, err := o.Run(ctx, pipeCfg)
 
 	progressCancel()
 

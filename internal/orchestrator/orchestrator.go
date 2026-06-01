@@ -72,6 +72,8 @@ func (o *Orchestrator) Run(ctx context.Context, pipelineCfg PipelineConfig) ([]P
 		if !result.Success && !pipelineCfg.OnErrorContinue {
 			return results, result.Error
 		}
+	} else {
+		log.Info("skipping precheck (user requested)")
 	}
 
 	if !pipelineCfg.SkipSchema {
@@ -81,6 +83,8 @@ func (o *Orchestrator) Run(ctx context.Context, pipelineCfg PipelineConfig) ([]P
 		if !result.Success && !pipelineCfg.OnErrorContinue {
 			return results, result.Error
 		}
+	} else {
+		log.Info("skipping schema migration (user requested)")
 	}
 
 	if !pipelineCfg.SkipData {
@@ -90,6 +94,8 @@ func (o *Orchestrator) Run(ctx context.Context, pipelineCfg PipelineConfig) ([]P
 		if !result.Success && !pipelineCfg.OnErrorContinue {
 			return results, result.Error
 		}
+	} else {
+		log.Info("skipping data migration (user requested)")
 	}
 
 	if !pipelineCfg.SkipValidate {
@@ -99,6 +105,8 @@ func (o *Orchestrator) Run(ctx context.Context, pipelineCfg PipelineConfig) ([]P
 		if !result.Success && !pipelineCfg.OnErrorContinue {
 			return results, result.Error
 		}
+	} else {
+		log.Info("skipping validation (user requested)")
 	}
 
 	o.cpMgr.SetPhase("completed")
