@@ -215,7 +215,7 @@ tr:hover td { background: #f8f9fa; }
 <div class="container">
 `)
 	sb.WriteString(`<div class="header">
-<h1><span class="logo">Ti</span>MS Migration Report</h1>
+<h1><span class="logo">Ti</span>MS 迁移报告</h1>
 <div class="subtitle">`)
 	sb.WriteString(htmlEsc(r.Phase))
 	sb.WriteString(` &middot; `)
@@ -224,14 +224,13 @@ tr:hover td { background: #f8f9fa; }
 	sb.WriteString(htmlEsc(r.EndTime.Format("2006-01-02 15:04:05")))
 	sb.WriteString(`</div></div>`)
 
-	// Overview card
 	statusClass := "overall-" + string(r.Status)
-	sb.WriteString(`<div class="card"><h2>Overview</h2><div class="stats">`)
-	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value %s">%s</div><div class="label">Status</div></div>`, statusClass, htmlEsc(string(r.Status))))
-	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value">%s</div><div class="label">Duration</div></div>`, htmlEsc(r.Duration)))
-	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value">%d</div><div class="label">Total Tables</div></div>`, r.Stats.TotalTables))
-	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value">%d</div><div class="label">Source Rows</div></div>`, r.Stats.TotalSourceRows))
-	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value">%d</div><div class="label">Target Rows</div></div>`, r.Stats.TotalTargetRows))
+	sb.WriteString(`<div class="card"><h2>概览</h2><div class="stats">`)
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value %s">%s</div><div class="label">状态</div></div>`, statusClass, htmlEsc(statusCN(string(r.Status)))))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value">%s</div><div class="label">耗时</div></div>`, htmlEsc(r.Duration)))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value">%d</div><div class="label">总表数</div></div>`, r.Stats.TotalTables))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value">%d</div><div class="label">源端行数</div></div>`, r.Stats.TotalSourceRows))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value">%d</div><div class="label">目标行数</div></div>`, r.Stats.TotalTargetRows))
 	sb.WriteString(`</div>`)
 	if r.Summary != "" {
 		sb.WriteString(fmt.Sprintf(`<div class="summary">%s</div>`, htmlEsc(r.Summary)))
@@ -239,22 +238,22 @@ tr:hover td { background: #f8f9fa; }
 	sb.WriteString(`</div>`)
 
 	// Stats card
-	sb.WriteString(`<div class="card"><h2>Statistics</h2><div class="stats">`)
-	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#2e7d32">%d</div><div class="label">Pass</div></div>`, r.Stats.PassTables))
-	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#c62828">%d</div><div class="label">Fail</div></div>`, r.Stats.FailTables))
-	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#e65100">%d</div><div class="label">Warn</div></div>`, r.Stats.WarnTables))
-	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#666">%d</div><div class="label">Skip</div></div>`, r.Stats.SkipTables))
+	sb.WriteString(`<div class="card"><h2>统计</h2><div class="stats">`)
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#2e7d32">%d</div><div class="label">通过</div></div>`, r.Stats.PassTables))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#c62828">%d</div><div class="label">失败</div></div>`, r.Stats.FailTables))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#e65100">%d</div><div class="label">警告</div></div>`, r.Stats.WarnTables))
+	sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#666">%d</div><div class="label">跳过</div></div>`, r.Stats.SkipTables))
 	if r.Stats.TotalDiffRows != 0 {
-		sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#c62828">%d</div><div class="label">Diff Rows</div></div>`, r.Stats.TotalDiffRows))
+		sb.WriteString(fmt.Sprintf(`<div class="stat"><div class="value" style="color:#c62828">%d</div><div class="label">差异行数</div></div>`, r.Stats.TotalDiffRows))
 	} else {
-		sb.WriteString(`<div class="stat"><div class="value" style="color:#2e7d32">0</div><div class="label">Diff Rows</div></div>`)
+		sb.WriteString(`<div class="stat"><div class="value" style="color:#2e7d32">0</div><div class="label">差异行数</div></div>`)
 	}
 	sb.WriteString(`</div></div>`)
 
 	// Table detail card
 	if len(r.Tables) > 0 {
-		sb.WriteString(`<div class="card"><h2>Table Details</h2><table><thead><tr>`)
-		sb.WriteString(`<th>#</th><th>Table</th><th>Status</th><th>Source Rows</th><th>Target Rows</th><th>Diff</th><th>Duration</th><th>Error</th>`)
+		sb.WriteString(`<div class="card"><h2>表详情</h2><table><thead><tr>`)
+		sb.WriteString(`<th>#</th><th>表名</th><th>状态</th><th>源端行数</th><th>目标行数</th><th>差异</th><th>耗时</th><th>错误</th>`)
 		sb.WriteString(`</tr></thead><tbody>`)
 		for i, t := range r.Tables {
 			badgeClass := "badge-" + string(t.Status)
@@ -267,12 +266,12 @@ tr:hover td { background: #f8f9fa; }
 				diffStr = fmt.Sprintf("%d", t.DiffRows)
 			}
 			sb.WriteString(fmt.Sprintf(`<tr><td>%d</td><td>%s</td><td><span class="badge %s">%s</span></td><td>%d</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td></tr>`,
-				i+1, htmlEsc(t.TableName), badgeClass, htmlEsc(string(t.Status)), t.SourceRows, t.TargetRows, diffStr, htmlEsc(t.Duration), errStr))
+				i+1, htmlEsc(t.TableName), badgeClass, htmlEsc(statusCN(string(t.Status))), t.SourceRows, t.TargetRows, diffStr, htmlEsc(t.Duration), errStr))
 		}
 		sb.WriteString(`</tbody></table></div>`)
 	}
 
-	sb.WriteString(`<div class="footer">Generated by TiMS (TiDB Migration Suite) &middot; `)
+	sb.WriteString(`<div class="footer">由 TiMS (TiDB Migration Suite) 生成 &middot; `)
 	sb.WriteString(htmlEsc(time.Now().Format("2006-01-02 15:04:05")))
 	sb.WriteString(`</div></div></body></html>`)
 
@@ -285,4 +284,19 @@ func htmlEsc(s string) string {
 	s = strings.ReplaceAll(s, ">", "&gt;")
 	s = strings.ReplaceAll(s, `"`, "&quot;")
 	return s
+}
+
+func statusCN(s string) string {
+	switch s {
+	case "pass":
+		return "通过"
+	case "fail":
+		return "失败"
+	case "warn":
+		return "警告"
+	case "skip":
+		return "跳过"
+	default:
+		return s
+	}
 }

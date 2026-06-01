@@ -813,7 +813,7 @@ func (s *Server) buildTaskReport(task *store.Task) *reporter.Report {
 				Duration:   "",
 			}
 			if !tc.FinishedAt.IsZero() && !tc.StartedAt.IsZero() {
-				tr.Duration = tc.FinishedAt.Sub(tc.StartedAt).String()
+				tr.Duration = reporter.FormatDuration(tc.FinishedAt.Sub(tc.StartedAt))
 			}
 			switch tc.State {
 			case checkpoint.StateCompleted:
@@ -850,7 +850,7 @@ func (s *Server) buildTaskReport(task *store.Task) *reporter.Report {
 	if task.FinishedAt != nil {
 		report.EndTime = *task.FinishedAt
 	}
-	report.Duration = report.EndTime.Sub(report.StartTime).String()
+	report.Duration = reporter.FormatDuration(report.EndTime.Sub(report.StartTime))
 
 	return report
 }
