@@ -666,28 +666,21 @@ func (m *Migrator) applyTargetPolicy(ctx context.Context, tidbDB *sql.DB, tables
 	}
 
 	var firstErr error
+	_, _ = tidbDB.ExecContext(ctx, "SET SESSION FOREIGN_KEY_CHECKS = 0")
+
 	for _, table := range tables {
-		switch policy {
-		case "truncate":
-			logger.Info("truncating table", zap.String("table", table))
-			_, err := tidbDB.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s", quoteMySQL(targetDB), quoteMySQL(table)))
-			if err != nil {
-				logger.Warn("truncate failed", zap.String("table", table), zap.Error(err))
-				if firstErr == nil {
-					firstErr = fmt.Errorf("truncate %s: %w", table, err)
-				}
+		_, err := tidbDB.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s", quoteMySQL(targetDB), quoteMySQL(table)))
+		if err != nil {
+			logger.Warn("truncate failed", zap.String("table", table), zap.Error(err))
+			if firstErr == nil {
+				firstErr = fmt.Errorf("truncate %s: %w", table, err)
 			}
-		case "drop":
-			logger.Info("truncating table (drop policy maps to truncate in data phase)", zap.String("table", table))
-			_, err := tidbDB.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s", quoteMySQL(targetDB), quoteMySQL(table)))
-			if err != nil {
-				logger.Warn("drop failed", zap.String("table", table), zap.Error(err))
-				if firstErr == nil {
-					firstErr = fmt.Errorf("drop %s: %w", table, err)
-				}
-			}
+		} else {
+			logger.Info("truncated table", zap.String("table", table))
 		}
 	}
+
+	_, _ = tidbDB.ExecContext(ctx, "SET SESSION FOREIGN_KEY_CHECKS = 1")
 	return firstErr
 }
 
