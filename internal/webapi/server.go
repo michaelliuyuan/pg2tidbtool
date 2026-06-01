@@ -421,15 +421,19 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		Source: req.Source,
 		Target: req.Target,
 		Migration: config.MigrationConfig{
-			Parallel:      req.Opts.Parallel,
-			BatchSize:     req.Opts.BatchSize,
-			Tables:        req.Opts.Tables,
-			ExcludeTables: req.Opts.ExcludeTables,
-			UseLightning:  req.Opts.UseLightning,
-			TempDir:       "/tmp/pg2tidb",
-			CheckpointDir: fmt.Sprintf(".checkpoint/%s", task.ID),
-			OnError:       "abort",
-			TargetPolicy:  req.Opts.TargetPolicy,
+			Parallel:            req.Opts.Parallel,
+			BatchSize:           req.Opts.BatchSize,
+			Tables:              req.Opts.Tables,
+			ExcludeTables:       req.Opts.ExcludeTables,
+			UseLightning:        req.Opts.UseLightning,
+			TempDir:             "/tmp/pg2tidb",
+			CheckpointDir:       fmt.Sprintf(".checkpoint/%s", task.ID),
+			OnError:             "abort",
+			TargetPolicy:        req.Opts.TargetPolicy,
+			SkipPrecheck:        req.Opts.SkipPrecheck,
+			SkipSchema:          req.Opts.SkipSchema,
+			SkipData:            req.Opts.SkipData,
+			SkipValidate:        req.Opts.SkipValidate,
 		},
 		Logging: config.LoggingConfig{Level: "info", Format: "console"},
 	}
@@ -539,7 +543,12 @@ func (s *Server) runMigration(ctx context.Context, taskID string, cfg config.Con
 	go s.pollProgress(progressCtx, taskID, cfg.Migration.CheckpointDir)
 
 	o := orchestrator.NewOrchestrator(cfg)
-	results, err := o.Run(ctx, orchestrator.PipelineConfig{})
+	results, err := o.Run(ctx, orchestrator.PipelineConfig{
+		SkipPrecheck: cfg.Migration.SkipPrecheck,
+		SkipSchema:   cfg.Migration.SkipSchema,
+		SkipData:     cfg.Migration.SkipData,
+		SkipValidate: cfg.Migration.SkipValidate,
+	})
 
 	progressCancel()
 

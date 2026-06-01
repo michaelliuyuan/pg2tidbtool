@@ -67,6 +67,10 @@ type MigrationConfig struct {
 	LargeTableThreshold int64    `yaml:"large_table_threshold" json:"largeTableThreshold"`
 	ChunkSize           int64    `yaml:"chunk_size" json:"chunkSize"`
 	ChunkParallel       int      `yaml:"chunk_parallel" json:"chunkParallel"`
+	SkipPrecheck        bool     `yaml:"skip_precheck" json:"skip_precheck"`
+	SkipSchema          bool     `yaml:"skip_schema" json:"skip_schema"`
+	SkipData            bool     `yaml:"skip_data" json:"skip_data"`
+	SkipValidate        bool     `yaml:"skip_validate" json:"skip_validate"`
 }
 
 func (m MigrationConfig) ReadTimeoutDuration() time.Duration {
