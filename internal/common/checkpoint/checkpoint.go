@@ -212,6 +212,15 @@ func (m *Manager) SetPhase(phase string) error {
 	return nil
 }
 
+func (m *Manager) SetPhaseWithReload(phase string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_ = m.load()
+	m.data.Phase = phase
+	m.save()
+	return nil
+}
+
 func (m *Manager) IsTableCompleted(tableName string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

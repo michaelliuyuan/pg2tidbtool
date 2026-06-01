@@ -109,7 +109,7 @@ func (o *Orchestrator) Run(ctx context.Context, pipelineCfg PipelineConfig) ([]P
 		log.Info("skipping validation (user requested)")
 	}
 
-	o.cpMgr.SetPhase("completed")
+	o.cpMgr.SetPhaseWithReload("completed")
 	log.Info("migration pipeline completed",
 		zap.String("duration", time.Since(startTime).String()),
 		zap.Int("phases", len(results)))
