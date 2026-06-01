@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -269,28 +270,13 @@ func (m *Migrator) executeDDL(ctx context.Context, ddl string) error {
 
 func extractObjectName(stmt string) string {
 	upper := strings.ToUpper(stmt)
-	if strings.HasPrefix(upper, "SET ") {
+	if strings.HasPrefix(upper, "SET ") || strings.HasPrefix(upper, "--") {
 		return ""
 	}
-	if strings.HasPrefix(upper, "DROP TABLE") {
-		parts := strings.Fields(stmt)
-		if len(parts) >= 3 {
-			return strings.Trim(parts[len(parts)-1], "`;")
-		}
-	}
-	if strings.HasPrefix(upper, "CREATE TABLE") {
-		parts := strings.Fields(stmt)
-		for i, p := range parts {
-			if (strings.ToUpper(p) == "EXISTS" || strings.ToUpper(p) == "TABLE") && i+1 < len(parts) {
-				return strings.Trim(parts[i+1], "`(")
-			}
-		}
-	}
-	if strings.HasPrefix(upper, "CREATE") || strings.HasPrefix(upper, "ALTER") {
-		parts := strings.Fields(stmt)
-		if len(parts) >= 3 {
-			return strings.Trim(parts[2], "`")
-		}
+	m := regexp.MustCompile("(?i)^(?:DROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?|CREATE\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?|ALTER\\s+TABLE\\s+|CREATE\\s+(?:UNIQUE\\s+)?INDEX\\s+)`?([^`\\s(]+)")
+	match := m.FindStringSubmatch(stmt)
+	if len(match) >= 2 {
+		return match[1]
 	}
 	return ""
 }
