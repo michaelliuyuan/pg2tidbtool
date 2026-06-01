@@ -194,6 +194,9 @@ func convertDefaultValue(pgDefault string, pgType PGType) string {
 	if idx := strings.Index(d, "::"); idx > 0 {
 		raw := d[:idx]
 		raw = strings.TrimSpace(raw)
+		if strings.ToUpper(raw) == "NULL" {
+			return ""
+		}
 		if strings.HasPrefix(raw, "'") && strings.HasSuffix(raw, "'") {
 			return raw
 		}
@@ -202,6 +205,10 @@ func convertDefaultValue(pgDefault string, pgType PGType) string {
 
 	if strings.HasPrefix(d, "'") && strings.HasSuffix(d, "'") {
 		return d
+	}
+
+	if strings.ToUpper(d) == "NULL" {
+		return ""
 	}
 
 	return d

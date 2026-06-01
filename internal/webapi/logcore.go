@@ -1,6 +1,7 @@
 package webapi
 
 import (
+	"strings"
 	"sync/atomic"
 
 	"go.uber.org/zap/zapcore"
@@ -59,7 +60,11 @@ func (c *TaskLogCore) Check(entry zapcore.Entry, ce *zapcore.CheckedEntry) *zapc
 }
 
 func (c *TaskLogCore) Write(entry zapcore.Entry, fields []zapcore.Field) error {
-	c.collector.Append(c.taskID, ZapLevelString(entry.Level), entry.Message, entry.Caller.String())
+	caller := entry.Caller.String()
+	if idx := strings.LastIndex(caller, "/"); idx >= 0 {
+		caller = caller[idx+1:]
+	}
+	c.collector.Append(c.taskID, ZapLevelString(entry.Level), entry.Message, caller)
 	return nil
 }
 
