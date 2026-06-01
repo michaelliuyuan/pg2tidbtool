@@ -66,7 +66,6 @@ func (o *Orchestrator) Run(ctx context.Context, pipelineCfg PipelineConfig) ([]P
 	startTime := time.Now()
 
 	if !pipelineCfg.SkipPrecheck {
-		o.cpMgr.SetPhase("precheck")
 		result := o.runPrecheck(ctx)
 		results = append(results, result)
 		if !result.Success && !pipelineCfg.OnErrorContinue {
@@ -77,7 +76,6 @@ func (o *Orchestrator) Run(ctx context.Context, pipelineCfg PipelineConfig) ([]P
 	}
 
 	if !pipelineCfg.SkipSchema {
-		o.cpMgr.SetPhase("schema")
 		result := o.runSchema(ctx)
 		results = append(results, result)
 		if !result.Success && !pipelineCfg.OnErrorContinue {
@@ -88,7 +86,6 @@ func (o *Orchestrator) Run(ctx context.Context, pipelineCfg PipelineConfig) ([]P
 	}
 
 	if !pipelineCfg.SkipData {
-		o.cpMgr.SetPhase("data")
 		result := o.runData(ctx)
 		results = append(results, result)
 		if !result.Success && !pipelineCfg.OnErrorContinue {
@@ -99,7 +96,6 @@ func (o *Orchestrator) Run(ctx context.Context, pipelineCfg PipelineConfig) ([]P
 	}
 
 	if !pipelineCfg.SkipValidate {
-		o.cpMgr.SetPhase("validate")
 		result := o.runValidate(ctx)
 		results = append(results, result)
 		if !result.Success && !pipelineCfg.OnErrorContinue {
