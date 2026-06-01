@@ -96,6 +96,11 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 		}
 	}
 
+	if m.cfg.Migration.TargetPolicy == "truncate" || m.cfg.Migration.TargetPolicy == "drop" {
+		builder.statements = append(builder.statements,
+			"SET FOREIGN_KEY_CHECKS = 0")
+	}
+
 	var deferredFKs []string
 
 	for _, table := range schemaInfo.Tables {
@@ -131,8 +136,6 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 		}
 		logger.Info("built table DDL", zap.String("table", table.Name), zap.String("ddl", builder.statements[len(builder.statements)-1]))
 
-		builder.BuildPrimaryKeyDDL(table)
-
 		for _, idx := range table.Indexes {
 			if idx.IsPrimary {
 				continue
@@ -158,6 +161,11 @@ func (m *Migrator) Run(ctx context.Context, opts common.SchemaOpts) error {
 	if len(deferredFKs) > 0 {
 		builder.statements = append(builder.statements, "-- Foreign Keys (deferred)")
 		builder.statements = append(builder.statements, deferredFKs...)
+	}
+
+	if m.cfg.Migration.TargetPolicy == "truncate" || m.cfg.Migration.TargetPolicy == "drop" {
+		builder.statements = append(builder.statements,
+			"SET FOREIGN_KEY_CHECKS = 1")
 	}
 
 	for _, view := range schemaInfo.Views {

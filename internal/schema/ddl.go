@@ -15,12 +15,28 @@ func NewDDLBuilder() *DDLBuilder {
 
 func (b *DDLBuilder) BuildTableDDL(table TableInfo) error {
 	var cols []string
+	pk := table.PrimaryKey()
+	pkColSet := make(map[string]bool)
+	if pk != nil {
+		for _, c := range pk.Columns {
+			pkColSet[c] = true
+		}
+	}
+
 	for _, col := range table.Columns {
 		colDDL, err := b.buildColumnDDL(col)
 		if err != nil {
 			return fmt.Errorf("column %s.%s: %w", table.Name, col.ColumnName, err)
 		}
 		cols = append(cols, colDDL)
+	}
+
+	if pk != nil {
+		pkCols := make([]string, len(pk.Columns))
+		for i, c := range pk.Columns {
+			pkCols[i] = QuoteIdentifier(c)
+		}
+		cols = append(cols, fmt.Sprintf("PRIMARY KEY (%s)", strings.Join(pkCols, ", ")))
 	}
 
 	var tableSuffix string
