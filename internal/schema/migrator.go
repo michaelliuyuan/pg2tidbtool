@@ -226,7 +226,9 @@ func (m *Migrator) executeDDL(ctx context.Context, ddl string) error {
 			continue
 		}
 		if _, err := tidbDB.ExecContext(ctx, stmt); err != nil {
-			zap.L().Warn("DDL statement failed", zap.Error(err), zap.String("stmt", truncate(stmt, 200)))
+			zap.L().Error("DDL statement failed",
+				zap.Error(err),
+				zap.String("stmt", stmt))
 			if m.cfg.Migration.OnError != "skip" {
 				return fmt.Errorf("execute DDL: %w", err)
 			}

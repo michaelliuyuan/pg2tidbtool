@@ -3,6 +3,8 @@ package schema
 import (
 	"fmt"
 	"strings"
+
+	"go.uber.org/zap"
 )
 
 type DDLBuilder struct {
@@ -26,6 +28,8 @@ func (b *DDLBuilder) BuildTableDDL(table TableInfo) error {
 	ddl := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n  %s\n)",
 		QuoteIdentifier(table.Name),
 		strings.Join(cols, ",\n  "))
+
+	zap.L().Info("generated CREATE TABLE DDL", zap.String("table", table.Name), zap.String("ddl", ddl))
 
 	b.statements = append(b.statements, ddl)
 
@@ -60,6 +64,10 @@ func (b *DDLBuilder) buildColumnDDL(col Column) (string, error) {
 	mysqlType := MapTypeWithPrecision(col.PGType, col.MaxLength, col.NumericScale)
 	if mysqlType == "" {
 		mysqlType = "TEXT"
+	}
+
+	if col.ColumnName == "" {
+		return "", fmt.Errorf("empty column name")
 	}
 
 	parts := []string{
