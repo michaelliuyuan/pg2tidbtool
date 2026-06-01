@@ -139,12 +139,12 @@ func MapTypeWithPrecision(pgType PGType, precision, scale int) string {
 		if precision > 0 {
 			return fmt.Sprintf("CHAR(%d)", precision)
 		}
-		return base
+		return "CHAR(255)"
 	case PGVarchar:
 		if precision > 0 {
 			return fmt.Sprintf("VARCHAR(%d)", precision)
 		}
-		return base
+		return "VARCHAR(255)"
 	case PGBit, PGVarbit:
 		if precision > 0 {
 			return fmt.Sprintf("BIT(%d)", precision)
