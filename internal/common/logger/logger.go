@@ -63,6 +63,7 @@ func InitWithOutput(level, format string, outputPath string) error {
 	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
 	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 	encoderConfig.EncodeDuration = zapcore.StringDurationEncoder
+	encoderConfig.EncodeCaller = zapcore.ShortCallerEncoder
 
 	var encoder zapcore.Encoder
 	switch format {

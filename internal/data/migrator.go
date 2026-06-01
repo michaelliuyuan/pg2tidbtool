@@ -188,7 +188,7 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 			}
 		}
 
-		if err := m.importViaLightning(ctx, opts); err != nil {
+		if err := m.importViaLightning(ctx, opts, tables); err != nil {
 			logger.Warn("LOAD DATA import failed, falling back to streaming INSERT", zap.Error(err))
 			if err := m.importViaSQL(ctx, opts); err != nil {
 				return nil, cerrors.Wrap(cerrors.ErrDataImport, "sql import", err)
@@ -362,7 +362,7 @@ func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string
 	return nil
 }
 
-func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts) error {
+func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts, tables []string) error {
 	logger := zap.L()
 	logger.Info("TiDB Lightning import starting", zap.String("dir", opts.TempDir))
 
@@ -459,6 +459,15 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts)
 	os.Remove(filepath.Join(sortedKVDir, "tidb_lightning_checkpoint.pb"))
 	os.Remove(filepath.Join(absDir, "tidb_lightning_checkpoint.pb"))
 
+	var filterSection string
+	if len(tables) > 0 {
+		var filterRules []string
+		for _, t := range tables {
+			filterRules = append(filterRules, fmt.Sprintf(`"%s.%s"`, targetDB, t))
+		}
+		filterSection = "\n[filter]\n" + fmt.Sprintf("import = [%s]\n", strings.Join(filterRules, ", "))
+	}
+
 	configContent := fmt.Sprintf(`[lightning]
 level = "info"
 
@@ -486,7 +495,7 @@ user = "%s"
 password = "%s"
 status-port = %d
 pd-addr = "%s"
-
+%s
 [post-restore]
 checksum = "optional"
 analyze = "off"
@@ -499,6 +508,7 @@ analyze = "off"
 		m.cfg.Target.Password,
 		statusPort,
 		pdAddr,
+		filterSection,
 	)
 
 	if m.cfg.Target.Password == "" {
@@ -528,7 +538,7 @@ port = %d
 user = "%s"
 status-port = %d
 pd-addr = "%s"
-
+%s
 [post-restore]
 checksum = "optional"
 analyze = "off"
@@ -540,6 +550,7 @@ analyze = "off"
 			m.cfg.Target.User,
 			statusPort,
 			pdAddr,
+			filterSection,
 		)
 	}
 
@@ -560,9 +571,12 @@ analyze = "off"
 	output, err := cmd.CombinedOutput()
 
 	var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+	var srcPathRe = regexp.MustCompile(`\([^)]*\.go:\d+\)`)
 	if len(output) > 0 {
 		outputStr := ansiRe.ReplaceAllString(string(output), "")
 		for _, line := range strings.Split(outputStr, "\n") {
+			line = strings.TrimSpace(line)
+			line = srcPathRe.ReplaceAllString(line, "")
 			line = strings.TrimSpace(line)
 			if line == "" {
 				continue
