@@ -453,6 +453,15 @@ function prevStep() {
             <el-descriptions-item label="数据冲突策略">
               {{ form.opts.target_policy === 'truncate' ? '先清空表' : form.opts.target_policy === 'drop' ? '先删除表' : '直接插入' }}
             </el-descriptions-item>
+            <el-descriptions-item label="跳过阶段" :span="2">
+              <template v-if="form.opts.skip_precheck || form.opts.skip_schema || form.opts.skip_data || form.opts.skip_validate">
+                <el-tag v-if="form.opts.skip_precheck" type="warning" style="margin-right: 4px;">跳过预检</el-tag>
+                <el-tag v-if="form.opts.skip_schema" type="warning" style="margin-right: 4px;">跳过 Schema</el-tag>
+                <el-tag v-if="form.opts.skip_data" type="danger" style="margin-right: 4px;">跳过数据迁移</el-tag>
+                <el-tag v-if="form.opts.skip_validate" type="warning" style="margin-right: 4px;">跳过验证</el-tag>
+              </template>
+              <template v-else>无（完整流程）</template>
+            </el-descriptions-item>
           </el-descriptions>
           <el-alert
             title="点击「开始迁移」将创建任务并立即开始执行迁移"
