@@ -598,31 +598,40 @@ analyze = "off"
 
 	cmd := exec.CommandContext(ctx, lightningBin, "--config", configPath)
 	cmd.Dir = absDir
-	output, err := cmd.CombinedOutput()
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("create stdout pipe: %w", err)
+	}
+	cmd.Stderr = cmd.Stdout
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start tidb-lightning: %w", err)
+	}
 
 	var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 	var srcPathRe = regexp.MustCompile(`\([^)]*\.go:\d+\)`)
-	if len(output) > 0 {
-		outputStr := ansiRe.ReplaceAllString(string(output), "")
-		for _, line := range strings.Split(outputStr, "\n") {
-			line = strings.TrimSpace(line)
-			line = srcPathRe.ReplaceAllString(line, "")
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			if strings.Contains(line, "[ERROR]") || strings.Contains(line, "[FATAL]") {
-				logger.Error("lightning: " + line)
-			} else if strings.Contains(line, "[WARN]") {
-				logger.Warn("lightning: " + line)
-			} else {
-				logger.Info("lightning: " + line)
-			}
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		line = ansiRe.ReplaceAllString(line, "")
+		line = srcPathRe.ReplaceAllString(line, "")
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, "[ERROR]") || strings.Contains(line, "[FATAL]") {
+			logger.Error("lightning: " + line)
+		} else if strings.Contains(line, "[WARN]") {
+			logger.Warn("lightning: " + line)
+		} else {
+			logger.Info("lightning: " + line)
 		}
 	}
 
-	if err != nil {
-		return fmt.Errorf("tidb-lightning failed: %w\noutput: %s", err, string(output))
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("tidb-lightning failed: %w", err)
 	}
 
 	logger.Info("TiDB Lightning import completed successfully")
