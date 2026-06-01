@@ -480,6 +480,7 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts,
 
 	configContent := fmt.Sprintf(`[lightning]
 level = "info"
+check-requirements = false
 
 [mydumper]
 data-source-dir = "%s"
@@ -523,6 +524,7 @@ analyze = "off"
 	if m.cfg.Target.Password == "" {
 		configContent = fmt.Sprintf(`[lightning]
 level = "info"
+check-requirements = false
 
 [mydumper]
 data-source-dir = "%s"
@@ -628,17 +630,22 @@ func (m *Migrator) applyTargetPolicy(ctx context.Context, tidbDB *sql.DB, tables
 	logger := zap.L()
 	logger.Info("applying target data policy", zap.String("policy", policy), zap.Int("tables", len(tables)))
 
+	targetDB := m.cfg.Target.Database
+	if targetDB == "" {
+		targetDB = "test"
+	}
+
 	for _, table := range tables {
 		switch policy {
 		case "truncate":
 			logger.Info("truncating table", zap.String("table", table))
-			_, err := tidbDB.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE %s", quoteMySQL(table)))
+			_, err := tidbDB.ExecContext(ctx, fmt.Sprintf("TRUNCATE TABLE %s.%s", quoteMySQL(targetDB), quoteMySQL(table)))
 			if err != nil {
 				logger.Warn("truncate failed", zap.String("table", table), zap.Error(err))
 			}
 		case "drop":
 			logger.Info("dropping table", zap.String("table", table))
-			_, err := tidbDB.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s", quoteMySQL(table)))
+			_, err := tidbDB.ExecContext(ctx, fmt.Sprintf("DROP TABLE IF EXISTS %s.%s", quoteMySQL(targetDB), quoteMySQL(table)))
 			if err != nil {
 				logger.Warn("drop failed", zap.String("table", table), zap.Error(err))
 			}
