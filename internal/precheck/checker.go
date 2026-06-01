@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -38,13 +39,23 @@ func (c *Checker) Run(ctx context.Context, opts common.PrecheckOpts) (*reporter.
 	rpt := reporter.NewReport("pre-check")
 
 	var items []CheckItem
+	var itemsMu sync.Mutex
+	var wg sync.WaitGroup
 
-	items = append(items, c.checkPGConnection(ctx))
-	items = append(items, c.checkTiDBConnection(ctx))
-	items = append(items, c.checkDiskSpace(ctx))
-	items = append(items, c.checkPGPermissions(ctx)...)
-	items = append(items, c.checkIncompatibleObjects(ctx)...)
-	items = append(items, c.checkCollation(ctx))
+	collect := func(newItems ...CheckItem) {
+		itemsMu.Lock()
+		items = append(items, newItems...)
+		itemsMu.Unlock()
+	}
+
+	wg.Add(6)
+	go func() { defer wg.Done(); collect(c.checkPGConnection(ctx)) }()
+	go func() { defer wg.Done(); collect(c.checkTiDBConnection(ctx)) }()
+	go func() { defer wg.Done(); collect(c.checkDiskSpace(ctx)) }()
+	go func() { defer wg.Done(); collect(c.checkPGPermissions(ctx)...) }()
+	go func() { defer wg.Done(); collect(c.checkIncompatibleObjects(ctx)...) }()
+	go func() { defer wg.Done(); collect(c.checkCollation(ctx)) }()
+	wg.Wait()
 
 	for _, item := range items {
 		tr := reporter.TableReport{

@@ -20,26 +20,26 @@ const (
 )
 
 type TableCheckpoint struct {
-	TableName  string                    `json:"table_name"`
-	State      State                     `json:"state"`
-	RowsDone   int64                     `json:"rows_done"`
-	RowsTotal  int64                     `json:"rows_total"`
-	BytesDone  int64                     `json:"bytes_done"`
-	StartedAt  time.Time                 `json:"started_at"`
-	UpdatedAt  time.Time                 `json:"updated_at"`
-	FinishedAt time.Time                 `json:"finished_at,omitempty"`
-	Error      string                    `json:"error,omitempty"`
-	Chunks     map[int]*ChunkCheckpoint  `json:"chunks,omitempty"`
+	TableName  string                   `json:"table_name"`
+	State      State                    `json:"state"`
+	RowsDone   int64                    `json:"rows_done"`
+	RowsTotal  int64                    `json:"rows_total"`
+	BytesDone  int64                    `json:"bytes_done"`
+	StartedAt  time.Time                `json:"started_at"`
+	UpdatedAt  time.Time                `json:"updated_at"`
+	FinishedAt time.Time                `json:"finished_at,omitempty"`
+	Error      string                   `json:"error,omitempty"`
+	Chunks     map[int]*ChunkCheckpoint `json:"chunks,omitempty"`
 }
 
 type ChunkCheckpoint struct {
-	Index     int       `json:"index"`
-	State     State     `json:"state"`
-	RowCount  int64     `json:"row_count"`
-	ByteCount int64     `json:"byte_count"`
-	StartedAt time.Time `json:"started_at,omitempty"`
+	Index      int       `json:"index"`
+	State      State     `json:"state"`
+	RowCount   int64     `json:"row_count"`
+	ByteCount  int64     `json:"byte_count"`
+	StartedAt  time.Time `json:"started_at,omitempty"`
 	FinishedAt time.Time `json:"finished_at,omitempty"`
-	Error     string    `json:"error,omitempty"`
+	Error      string    `json:"error,omitempty"`
 }
 
 func (tc *TableCheckpoint) Progress() float64 {
@@ -66,6 +66,12 @@ type Manager struct {
 	dir      string
 	filePath string
 	data     *Checkpoint
+
+	saveMu    sync.Mutex
+	dirty     bool
+	saveCh    chan struct{}
+	saveDone  chan struct{}
+	flushSync bool
 }
 
 func NewManager(dir string) (*Manager, error) {
@@ -82,8 +88,89 @@ func NewManager(dir string) (*Manager, error) {
 			UpdatedAt: time.Now(),
 			Tables:    make(map[string]*TableCheckpoint),
 		},
+		saveCh:   make(chan struct{}, 1),
+		saveDone: make(chan struct{}),
 	}
-	return m, m.load()
+	if err := m.load(); err != nil {
+		return nil, err
+	}
+	go m.asyncSaver()
+	return m, nil
+}
+
+func (m *Manager) asyncSaver() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.saveCh:
+			if m.flushSync {
+				m.doSaveLocked()
+				m.saveDone <- struct{}{}
+				return
+			}
+			m.doSave()
+		case <-ticker.C:
+			m.doSave()
+		}
+	}
+}
+
+func (m *Manager) doSave() {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+	if !m.dirty {
+		return
+	}
+	m.mu.Lock()
+	m.data.UpdatedAt = time.Now()
+	data, err := json.MarshalIndent(m.data, "", "  ")
+	m.mu.Unlock()
+	if err != nil {
+		return
+	}
+	tmp := m.filePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return
+	}
+	if err := os.Rename(tmp, m.filePath); err != nil {
+		return
+	}
+	m.dirty = false
+}
+
+func (m *Manager) doSaveLocked() {
+	m.saveMu.Lock()
+	defer m.saveMu.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.data.UpdatedAt = time.Now()
+	data, err := json.MarshalIndent(m.data, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := m.filePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, m.filePath)
+	m.dirty = false
+}
+
+func (m *Manager) markDirty() {
+	m.dirty = true
+	select {
+	case m.saveCh <- struct{}{}:
+	default:
+	}
+}
+
+func (m *Manager) Flush() {
+	m.mu.Lock()
+	m.flushSync = true
+	m.markDirty()
+	m.mu.Unlock()
+	<-m.saveDone
 }
 
 func (m *Manager) load() error {
@@ -95,22 +182,6 @@ func (m *Manager) load() error {
 		return fmt.Errorf("read checkpoint: %w", err)
 	}
 	return json.Unmarshal(data, m.data)
-}
-
-func (m *Manager) save() error {
-	m.data.UpdatedAt = time.Now()
-	data, err := json.MarshalIndent(m.data, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal checkpoint: %w", err)
-	}
-	tmp := m.filePath + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
-		return fmt.Errorf("write checkpoint: %w", err)
-	}
-	if err := os.Rename(tmp, m.filePath); err != nil {
-		return fmt.Errorf("rename checkpoint: %w", err)
-	}
-	return nil
 }
 
 func (m *Manager) GetOrCreateTable(tableName string, totalRows int64) *TableCheckpoint {
@@ -126,7 +197,7 @@ func (m *Manager) GetOrCreateTable(tableName string, totalRows int64) *TableChec
 		RowsTotal: totalRows,
 	}
 	m.data.Tables[tableName] = tc
-	_ = m.save()
+	m.markDirty()
 	return tc
 }
 
@@ -139,7 +210,8 @@ func (m *Manager) UpdateTable(tableName string, fn func(tc *TableCheckpoint)) er
 		return fmt.Errorf("table %s not found in checkpoint", tableName)
 	}
 	fn(tc)
-	return m.save()
+	m.markDirty()
+	return nil
 }
 
 func (m *Manager) MarkTableRunning(tableName string) error {
@@ -183,7 +255,8 @@ func (m *Manager) SetPhase(phase string) error {
 	defer m.mu.Unlock()
 	_ = m.load()
 	m.data.Phase = phase
-	return m.save()
+	m.markDirty()
+	return nil
 }
 
 func (m *Manager) IsTableCompleted(tableName string) bool {
@@ -230,7 +303,7 @@ func (m *Manager) ResetAllTables() {
 		tc.RowsDone = 0
 		tc.BytesDone = 0
 	}
-	_ = m.save()
+	m.markDirty()
 }
 
 func (m *Manager) Summary() (completed, failed, pending, running int) {
@@ -256,7 +329,8 @@ func (m *Manager) Reset() error {
 	defer m.mu.Unlock()
 	m.data.Tables = make(map[string]*TableCheckpoint)
 	m.data.Phase = ""
-	return m.save()
+	m.markDirty()
+	return nil
 }
 
 func (m *Manager) IsChunkCompleted(tableName string, chunkIndex int) bool {
@@ -295,13 +369,14 @@ func (m *Manager) MarkChunkCompleted(tableName string, chunkIndex int, rows, byt
 		tc.Chunks = make(map[int]*ChunkCheckpoint)
 	}
 	tc.Chunks[chunkIndex] = &ChunkCheckpoint{
-		Index:     chunkIndex,
-		State:     StateCompleted,
-		RowCount:  rows,
-		ByteCount: bytes,
+		Index:      chunkIndex,
+		State:      StateCompleted,
+		RowCount:   rows,
+		ByteCount:  bytes,
 		FinishedAt: time.Now(),
 	}
-	return m.save()
+	m.markDirty()
+	return nil
 }
 
 func (m *Manager) MarkChunkFailed(tableName string, chunkIndex int, errMsg string) error {
@@ -315,12 +390,13 @@ func (m *Manager) MarkChunkFailed(tableName string, chunkIndex int, errMsg strin
 		tc.Chunks = make(map[int]*ChunkCheckpoint)
 	}
 	tc.Chunks[chunkIndex] = &ChunkCheckpoint{
-		Index:     chunkIndex,
-		State:     StateFailed,
-		Error:     errMsg,
+		Index:      chunkIndex,
+		State:      StateFailed,
+		Error:      errMsg,
 		FinishedAt: time.Now(),
 	}
-	return m.save()
+	m.markDirty()
+	return nil
 }
 
 func (m *Manager) GetPendingChunks(tableName string) []int {
@@ -354,7 +430,7 @@ func (m *Manager) InitChunk(tableName string, chunkIndex int) {
 			Index: chunkIndex,
 			State: StatePending,
 		}
-		_ = m.save()
+		m.markDirty()
 	}
 }
 
@@ -366,5 +442,5 @@ func (m *Manager) ResetChunks(tableName string) {
 		return
 	}
 	tc.Chunks = nil
-	_ = m.save()
+	m.markDirty()
 }

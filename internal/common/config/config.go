@@ -126,7 +126,7 @@ func DefaultConfig() *Config {
 			WriteTimeout:        "30m",
 			LargeTableThreshold: 1000000,
 			ChunkSize:           500000,
-			ChunkParallel:       2,
+			ChunkParallel:       4,
 		},
 		Logging: LoggingConfig{
 			Level:  "info",

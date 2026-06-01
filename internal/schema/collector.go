@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 
 	"go.uber.org/zap"
 )
@@ -42,14 +43,29 @@ func (c *Collector) CollectTables(ctx context.Context, schema string, excludeTab
 	}
 
 	var tables []TableInfo
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+
 	for _, name := range tableNames {
-		table, err := c.collectTable(ctx, schema, name)
-		if err != nil {
-			zap.L().Warn("failed to collect table", zap.String("table", name), zap.Error(err))
-			continue
-		}
-		tables = append(tables, *table)
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(tableName string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			table, err := c.collectTable(ctx, schema, tableName)
+			if err != nil {
+				zap.L().Warn("failed to collect table", zap.String("table", tableName), zap.Error(err))
+				return
+			}
+			mu.Lock()
+			tables = append(tables, *table)
+			mu.Unlock()
+		}(name)
 	}
+
+	wg.Wait()
 	return tables, nil
 }
 

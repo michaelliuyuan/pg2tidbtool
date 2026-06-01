@@ -1,6 +1,7 @@
 package data
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -168,6 +169,7 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 
 		wg.Wait()
 		m.display.Stop()
+		m.cpMgr.Flush()
 
 		if firstErr != nil && m.cfg.Migration.OnError != "skip" {
 			return nil, firstErr
@@ -175,6 +177,7 @@ func (m *Migrator) Run(ctx context.Context, opts common.DataOpts) (*common.DataR
 
 		m.cpMgr.SetPhase("data-import")
 		m.cpMgr.ResetAllTables()
+		m.cpMgr.Flush()
 
 		if err := m.importViaLightning(ctx, opts, tables); err != nil {
 			logger.Warn("LOAD DATA import failed, falling back to streaming INSERT", zap.Error(err))
@@ -304,7 +307,6 @@ func (m *Migrator) exportTable(ctx context.Context, table string, opts common.Da
 }
 
 func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string, f *os.File, opts common.DataOpts, totalRows *int64) error {
-	// Build SELECT query that converts array columns to JSON
 	selectCols, err := m.buildSelectCols(ctx, schema, table)
 	if err != nil {
 		return fmt.Errorf("build select columns: %w", err)
@@ -326,6 +328,7 @@ func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string
 		valuePtrs[i] = &values[i]
 	}
 
+	bw := bufio.NewWriterSize(f, 256*1024)
 	var rowCount int64
 	for rows.Next() {
 		if err := rows.Scan(valuePtrs...); err != nil {
@@ -336,7 +339,7 @@ func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string
 			record[i] = convertValue(val)
 		}
 		line := strings.Join(record, "\t") + "\n"
-		if _, err := f.WriteString(line); err != nil {
+		if _, err := bw.WriteString(line); err != nil {
 			return fmt.Errorf("write row: %w", err)
 		}
 		rowCount++
@@ -346,6 +349,9 @@ func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string
 		}
 	}
 
+	if err := bw.Flush(); err != nil {
+		return fmt.Errorf("flush csv writer: %w", err)
+	}
 	*totalRows = rowCount
 	return nil
 }
@@ -1338,7 +1344,7 @@ func (m *Migrator) calculateChunkBoundariesByOffset(numChunks, chunkSize int64) 
 
 func (m *Migrator) exportChunk(
 	ctx context.Context,
-	schema, table, pkColumn string,
+	schema, table, pkColumn, selectCols string,
 	boundary ChunkBoundary,
 	chunkFile string,
 	opts common.DataOpts,
@@ -1349,11 +1355,6 @@ func (m *Migrator) exportChunk(
 		return 0, 0, fmt.Errorf("create chunk file %s: %w", chunkFile, err)
 	}
 	defer f.Close()
-
-	selectCols, err := m.buildSelectCols(ctx, schema, table)
-	if err != nil {
-		return 0, 0, fmt.Errorf("build select columns: %w", err)
-	}
 
 	var query string
 	var rows *sql.Rows
@@ -1395,6 +1396,7 @@ func (m *Migrator) exportChunk(
 		valuePtrs[i] = &values[i]
 	}
 
+	bw := bufio.NewWriterSize(f, 256*1024)
 	var rowCount int64
 	var byteCount int64
 	for rows.Next() {
@@ -1406,12 +1408,16 @@ func (m *Migrator) exportChunk(
 			record[i] = convertValue(val)
 		}
 		line := strings.Join(record, "\t") + "\n"
-		n, writeErr := f.WriteString(line)
+		n, writeErr := bw.WriteString(line)
 		if writeErr != nil {
 			return rowCount, byteCount, fmt.Errorf("write row in chunk %d: %w", boundary.Index, writeErr)
 		}
 		byteCount += int64(n)
 		rowCount++
+	}
+
+	if err := bw.Flush(); err != nil {
+		return rowCount, byteCount, fmt.Errorf("flush chunk writer %d: %w", boundary.Index, err)
 	}
 
 	return rowCount, byteCount, nil
@@ -1474,7 +1480,12 @@ func (m *Migrator) exportTableChunked(
 
 	chunkParallel := m.cfg.Migration.ChunkParallel
 	if chunkParallel <= 0 {
-		chunkParallel = 2
+		chunkParallel = 4
+	}
+
+	selectCols, err := m.buildSelectCols(ctx, schema, table)
+	if err != nil {
+		return 0, 0, fmt.Errorf("build select columns: %w", err)
 	}
 
 	var totalRows, totalBytes int64
@@ -1501,7 +1512,7 @@ func (m *Migrator) exportTableChunked(
 			defer func() { <-sem }()
 
 			chunkFile := filepath.Join(opts.TempDir, fmt.Sprintf("%s.%d.csv", table, b.Index))
-			rows, bytes, exportErr := m.exportChunk(ctx, schema, table, pkColumn, b, chunkFile, opts, isOffsetMode)
+			rows, bytes, exportErr := m.exportChunk(ctx, schema, table, pkColumn, selectCols, b, chunkFile, opts, isOffsetMode)
 			if exportErr != nil {
 				m.cpMgr.MarkChunkFailed(table, b.Index, exportErr.Error())
 				mu.Lock()

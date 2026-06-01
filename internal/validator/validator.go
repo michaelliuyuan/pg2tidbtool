@@ -45,39 +45,60 @@ func (v *Validator) Run(ctx context.Context, opts common.ValidateOpts) (*reporte
 	}
 	defer tidbDB.Close()
 
+	pgDB.SetMaxOpenConns(8)
+	pgDB.SetConnMaxLifetime(5 * time.Minute)
+	tidbDB.SetMaxOpenConns(8)
+	tidbDB.SetConnMaxLifetime(5 * time.Minute)
+
 	tables, err := v.getTables(ctx, pgDB, opts.Tables)
 	if err != nil {
 		return nil, cerrors.Wrap(cerrors.ErrValidateRowCount, "get table list", err)
 	}
 
+	parallel := v.cfg.Migration.Parallel
+	if parallel <= 0 {
+		parallel = 4
+	}
+
 	var mu sync.Mutex
+	sem := make(chan struct{}, parallel)
+	var wg sync.WaitGroup
 
 	for _, table := range tables {
-		var tr reporter.TableReport
-		switch opts.Level {
-		case "L1":
-			tr = v.validateRowCount(ctx, pgDB, tidbDB, table)
-		case "L2":
-			tr = v.validateSampling(ctx, pgDB, tidbDB, table, opts.SampleRatio)
-		case "L3":
-			tr = v.validateChecksum(ctx, pgDB, tidbDB, table)
-		default:
-			tr = reporter.TableReport{
-				TableName: table,
-				Status:    reporter.StatusFail,
-				Error:     fmt.Sprintf("unknown validation level: %s", opts.Level),
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(tableName string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			var tr reporter.TableReport
+			switch opts.Level {
+			case "L1":
+				tr = v.validateRowCount(ctx, pgDB, tidbDB, tableName)
+			case "L2":
+				tr = v.validateSampling(ctx, pgDB, tidbDB, tableName, opts.SampleRatio)
+			case "L3":
+				tr = v.validateChecksum(ctx, pgDB, tidbDB, tableName)
+			default:
+				tr = reporter.TableReport{
+					TableName: tableName,
+					Status:    reporter.StatusFail,
+					Error:     fmt.Sprintf("unknown validation level: %s", opts.Level),
+				}
 			}
-		}
 
-		mu.Lock()
-		rpt.AddTableReport(tr)
-		mu.Unlock()
+			mu.Lock()
+			rpt.AddTableReport(tr)
+			mu.Unlock()
 
-		logger.Info("table validation result",
-			zap.String("table", table),
-			zap.String("status", string(tr.Status)),
-			zap.Int64("diff", tr.DiffRows))
+			logger.Info("table validation result",
+				zap.String("table", tableName),
+				zap.String("status", string(tr.Status)),
+				zap.Int64("diff", tr.DiffRows))
+		}(table)
 	}
+
+	wg.Wait()
 
 	rpt.Finish(rpt.OverallStatus(), fmt.Sprintf("validated %d tables at level %s", len(tables), opts.Level))
 
