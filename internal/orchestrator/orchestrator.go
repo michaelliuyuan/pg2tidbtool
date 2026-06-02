@@ -3,6 +3,8 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/pg2tidb/pg2tidb-migrator/internal/api"
@@ -86,6 +88,14 @@ func (o *Orchestrator) Run(ctx context.Context, pipelineCfg PipelineConfig) ([]P
 	}
 
 	if !pipelineCfg.SkipData {
+		if o.cfg.Migration.TargetPolicy == "drop" || o.cfg.Migration.TargetPolicy == "truncate" {
+			cpDir := o.cfg.Migration.CheckpointDir
+			if cpDir == "" {
+				cpDir = ".checkpoint"
+			}
+			os.RemoveAll(filepath.Join(cpDir, "checkpoint.json"))
+			log.Info("cleared checkpoint for drop/truncate policy to force fresh data migration")
+		}
 		result := o.runData(ctx)
 		results = append(results, result)
 		if !result.Success && !pipelineCfg.OnErrorContinue {

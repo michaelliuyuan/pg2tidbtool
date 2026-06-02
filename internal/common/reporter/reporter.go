@@ -110,10 +110,20 @@ func (r *Report) computeStats() {
 }
 
 func (r *Report) OverallStatus() Status {
-	if r.Stats.FailTables > 0 {
+	failCount := 0
+	warnCount := 0
+	for _, t := range r.Tables {
+		switch t.Status {
+		case StatusFail:
+			failCount++
+		case StatusWarn:
+			warnCount++
+		}
+	}
+	if failCount > 0 {
 		return StatusFail
 	}
-	if r.Stats.WarnTables > 0 {
+	if warnCount > 0 {
 		return StatusWarn
 	}
 	return StatusPass

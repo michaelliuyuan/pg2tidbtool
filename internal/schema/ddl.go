@@ -132,7 +132,7 @@ func (b *DDLBuilder) BuildIndexDDL(idx Index) string {
 		unique = "UNIQUE "
 	}
 
-	return fmt.Sprintf("CREATE %sINDEX %s ON %s (%s)",
+	return fmt.Sprintf("CREATE %sINDEX IF NOT EXISTS %s ON %s (%s)",
 		unique,
 		QuoteIdentifier(idx.IndexName),
 		QuoteIdentifier(idx.TableName),
