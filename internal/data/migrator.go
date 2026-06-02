@@ -1175,7 +1175,11 @@ func splitPGArrayElements(s string) []string {
 
 // escapeTSV escapes characters that would break tab-separated format.
 // TiDB Lightning CSV with backslash-escape handles these correctly.
+// IMPORTANT: The NULL marker "\N" must NOT be escaped — skip it.
 func escapeTSV(s string) string {
+	if s == "\\N" {
+		return s // NULL marker, don't escape
+	}
 	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "\n", "\\n")
 	s = strings.ReplaceAll(s, "\r", "\\r")
