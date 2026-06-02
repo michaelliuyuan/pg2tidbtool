@@ -13,6 +13,7 @@ import (
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/config"
 	cerrors "github.com/pg2tidb/pg2tidb-migrator/internal/common/errors"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/logger"
+	"github.com/pg2tidb/pg2tidb-migrator/internal/common/reporter"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/data"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/precheck"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/schema"
@@ -240,6 +241,13 @@ func (o *Orchestrator) runValidate(ctx context.Context) PipelineResult {
 		log.Info("data validation completed",
 			zap.String("status", string(rpt.Status)),
 			zap.String("duration", time.Since(start).String()))
+		if rpt.Status == reporter.StatusFail {
+			result.Success = false
+			result.Error = fmt.Errorf("data validation failed: %d/%d tables failed", rpt.Stats.FailTables, rpt.Stats.TotalTables)
+			log.Error("data validation failed",
+				zap.Int("fail", rpt.Stats.FailTables),
+				zap.Int("total", rpt.Stats.TotalTables))
+		}
 	}
 
 	return result

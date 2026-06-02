@@ -262,6 +262,16 @@ func (m *Migrator) executeDDL(ctx context.Context, ddl string) error {
 		maxRetries := 3
 		for attempt := 1; attempt <= maxRetries; attempt++ {
 			if _, err := tidbDB.ExecContext(ctx, stmt); err != nil {
+				// Skip duplicate foreign key / index errors (idempotent re-run)
+				errStr := err.Error()
+				if strings.Contains(errStr, "Duplicate foreign key") ||
+					strings.Contains(errStr, "Duplicate key name") ||
+					strings.Contains(errStr, "1826") ||
+					strings.Contains(errStr, "1061") {
+					zap.L().Info(fmt.Sprintf("DDL SKIP (already exists): %s", label))
+					lastErr = nil
+					break
+				}
 				lastErr = err
 				if attempt < maxRetries {
 					zap.L().Warn(fmt.Sprintf("DDL %s failed (attempt %d/%d), retrying...", label, attempt, maxRetries), zap.Error(err))

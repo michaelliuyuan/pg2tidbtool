@@ -483,6 +483,14 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts,
 			continue
 		}
 		baseName := strings.TrimSuffix(entry.Name(), ".csv")
+		// After rename, files are {database}.{table}.csv or {database}.{table}.{chunk}.csv
+		// Strip the database prefix to get the plain table name
+		if strings.Contains(baseName, ".") {
+			parts := strings.SplitN(baseName, ".", 2)
+			if len(parts) == 2 {
+				baseName = parts[1]
+			}
+		}
 		if idx := chunkFileIndexRegexp.FindStringSubmatch(baseName); idx != nil {
 			baseName = idx[1]
 		}
