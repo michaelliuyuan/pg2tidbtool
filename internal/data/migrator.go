@@ -1173,6 +1173,20 @@ func splitPGArrayElements(s string) []string {
 	return elements
 }
 
+func convertStringValue(s string) string {
+	// PG arrays use {elem1,elem2,...} syntax, JSON objects use {"key":"val"}.
+	// JSON already starts with {" (object) or [" (array).
+	// Only convert if it's a PG array, not JSON.
+	if len(s) > 1 && s[0] == '{' && s[len(s)-1] == '}' {
+		// JSON objects contain "key": pattern — don't touch them
+		if strings.Contains(s, `":`) {
+			return s
+		}
+		return pgArrayToJSON(s)
+	}
+	return s
+}
+
 func convertValue(val interface{}) string {
 	if val == nil {
 		return "\\N"
@@ -1183,27 +1197,14 @@ func convertValue(val interface{}) string {
 			return "1"
 		}
 		return "0"
-	case []byte:
-		s := string(v)
-		// Convert PG array format {1,2,3} to JSON [1,2,3]
-		if len(s) > 1 && s[0] == '{' && s[len(s)-1] == '}' {
-			return pgArrayToJSON(s)
-		}
-		return s
+case []byte:
+		return convertStringValue(string(v))
 	case string:
-		// Convert PG array format {1,2,3} to JSON [1,2,3]
-		if len(v) > 1 && v[0] == '{' && v[len(v)-1] == '}' {
-			return pgArrayToJSON(v)
-		}
-		return v
+		return convertStringValue(v)
 	case time.Time:
 		return v.Format("2006-01-02 15:04:05.999999")
 	case fmt.Stringer:
-		s := v.String()
-		if len(s) > 1 && s[0] == '{' && s[len(s)-1] == '}' {
-			return pgArrayToJSON(s)
-		}
-		return s
+		return convertStringValue(v.String())
 	default:
 		return fmt.Sprintf("%v", v)
 	}

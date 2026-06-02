@@ -385,16 +385,30 @@ func normalizeValue(val interface{}) string {
 }
 
 var uuidRe = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+var pgArrayRe = regexp.MustCompile(`^\{.*\}$`)
 
 func normalizeString(s string) string {
 	// Normalize UUID to lowercase
 	s = uuidRe.ReplaceAllStringFunc(s, func(m string) string {
 		return strings.ToLower(m)
 	})
+	// Normalize PG array format {1,2,3} -> [1,2,3] (must be before JSON check)
+	if pgArrayRe.MatchString(s) {
+		return normalizePGArray(s)
+	}
 	// Normalize JSON whitespace
 	if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") {
 		return normalizeJSON(s)
 	}
+	return s
+}
+
+func normalizePGArray(s string) string {
+	// Replace PG array delimiters with JSON array format
+	s = strings.ReplaceAll(s, "{", "[")
+	s = strings.ReplaceAll(s, "}", "]")
+	// Double quotes in PG arrays -> JSON quotes
+	s = strings.ReplaceAll(s, `"`, `\"`)
 	return s
 }
 
