@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -360,23 +361,31 @@ func normalizeValue(val interface{}) string {
 		}
 		return "0"
 	case []byte:
-		s := string(v)
-		if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") {
-			s = normalizeJSON(s)
-		}
-		return s
+		// Compare bytea/blobs as hex for cross-DB consistency
+		return fmt.Sprintf("%x", v)
 	case time.Time:
 		return v.Format("2006-01-02 15:04:05")
 	case string:
-		if strings.HasPrefix(v, "{") || strings.HasPrefix(v, "[") {
-			return normalizeJSON(v)
-		}
-		return v
+		return normalizeString(v)
 	case fmt.Stringer:
-		return v.String()
+		return normalizeString(v.String())
 	default:
-		return fmt.Sprintf("%v", v)
+		return normalizeString(fmt.Sprintf("%v", v))
 	}
+}
+
+var uuidRe = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
+
+func normalizeString(s string) string {
+	// Normalize UUID to lowercase
+	s = uuidRe.ReplaceAllStringFunc(s, func(m string) string {
+		return strings.ToLower(m)
+	})
+	// Normalize JSON whitespace
+	if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") {
+		return normalizeJSON(s)
+	}
+	return s
 }
 
 func normalizeJSON(s string) string {
