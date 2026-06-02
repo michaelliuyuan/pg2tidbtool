@@ -235,6 +235,7 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 	}
 
 	var mismatchCount int
+	var mismatchDetails []string
 	rowIdx := 0
 	for tidbRows.Next() {
 		if err := tidbRows.Scan(tidbPtrs...); err != nil {
@@ -252,6 +253,8 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 				tidbVal := normalizeValue(val)
 				if pgVal != tidbVal {
 					mismatchCount++
+					colName := tidbCols[colIdx].Name()
+					mismatchDetails = append(mismatchDetails, fmt.Sprintf("row %d col %q: PG=%q TiDB=%q", rowIdx+int(offset)+1, colName, truncate(pgVal, 80), truncate(tidbVal, 80)))
 					break
 				}
 			}
@@ -261,7 +264,12 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 
 	if mismatchCount > 0 {
 		tr.Status = reporter.StatusFail
-		tr.Error = fmt.Sprintf("%d/%d rows mismatch in sampling", mismatchCount, len(pgData))
+		maxShow := 10
+		if len(mismatchDetails) > maxShow {
+			mismatchDetails = mismatchDetails[:maxShow]
+		}
+		detailStr := strings.Join(mismatchDetails, "; ")
+		tr.Error = fmt.Sprintf("%d/%d rows mismatch in sampling (%s)", mismatchCount, len(pgData), detailStr)
 	} else {
 		tr.Status = reporter.StatusPass
 	}
@@ -349,7 +357,6 @@ func quoteMySQL(name string) string {
 	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
 }
 
-
 func normalizeValue(val interface{}) string {
 	if val == nil {
 		return "\\N"
@@ -419,4 +426,11 @@ func normalizeJSON(s string) string {
 		buf.WriteRune(r)
 	}
 	return buf.String()
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
