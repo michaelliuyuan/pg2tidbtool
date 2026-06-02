@@ -601,6 +601,7 @@ analyze = "off"
 
 	cmd := exec.CommandContext(ctx, lightningBin, "--config", configPath, "--log-file=-")
 	cmd.Dir = absDir
+	cmd.Env = append(os.Environ(), "NO_COLOR=1", "TERM=dumb")
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -611,14 +612,12 @@ analyze = "off"
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start tidb-lightning: %w", err)
 	}
-
-	var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
-	var srcPathRe = regexp.MustCompile(`\([^)]*\.go:\d+\)`)
+	var srcPathRe = regexp.MustCompile(`\([^)]*\.go:\d+)`)
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		line = ansiRe.ReplaceAllString(line, "")
+
 		line = srcPathRe.ReplaceAllString(line, "")
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -628,13 +627,10 @@ analyze = "off"
 			logger.Error("lightning: " + line)
 		} else if strings.Contains(line, "[WARN]") {
 			logger.Warn("lightning: " + line)
-		} else if strings.Contains(line, "restore table") ||
+			} else if strings.Contains(line, "restore table `") ||
 			strings.Contains(line, "checksum") ||
-			strings.Contains(line, "restore all tables") ||
-			strings.Contains(line, "exit") ||
-			strings.Contains(line, "import") ||
-			strings.Contains(line, "total") ||
-			strings.Contains(line, "encode") {
+			strings.Contains(line, "the whole procedure") ||
+			strings.Contains(line, "tidb lightning exit") {
 			logger.Info("lightning: " + line)
 		}
 	}

@@ -348,6 +348,7 @@ func quoteMySQL(name string) string {
 	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
 }
 
+
 func normalizeValue(val interface{}) string {
 	if val == nil {
 		return "\\N"
@@ -359,12 +360,54 @@ func normalizeValue(val interface{}) string {
 		}
 		return "0"
 	case []byte:
-		return string(v)
+		s := string(v)
+		if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") {
+			s = normalizeJSON(s)
+		}
+		return s
 	case time.Time:
-		return v.Format("2006-01-02 15:04:05.999999")
+		return v.Format("2006-01-02 15:04:05")
+	case string:
+		if strings.HasPrefix(v, "{") || strings.HasPrefix(v, "[") {
+			return normalizeJSON(v)
+		}
+		return v
 	case fmt.Stringer:
 		return v.String()
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+func normalizeJSON(s string) string {
+	var buf strings.Builder
+	buf.Grow(len(s))
+	inString := false
+	escaped := false
+	for _, r := range s {
+		if escaped {
+			buf.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' && inString {
+			buf.WriteRune(r)
+			escaped = true
+			continue
+		}
+		if r == '"' {
+			inString = !inString
+			buf.WriteRune(r)
+			continue
+		}
+		if inString {
+			buf.WriteRune(r)
+			continue
+		}
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			continue
+		}
+		buf.WriteRune(r)
+	}
+	return buf.String()
 }
