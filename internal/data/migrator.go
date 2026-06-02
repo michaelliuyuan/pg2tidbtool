@@ -338,7 +338,7 @@ func (m *Migrator) exportTableFallback(ctx context.Context, schema, table string
 		}
 		record := make([]string, len(cols))
 		for i, val := range values {
-			record[i] = convertValue(val)
+			record[i] = escapeTSV(convertValue(val))
 		}
 		line := strings.Join(record, "\t") + "\n"
 		if _, err := bw.WriteString(line); err != nil {
@@ -515,7 +515,7 @@ delimiter = ""
 header = false
 not-null = false
 null = "\\N"
-backslash-escape = false
+backslash-escape = true
 trim-last-separator = false
 
 [tikv-importer]
@@ -559,7 +559,7 @@ delimiter = ""
 header = false
 not-null = false
 null = "\\N"
-backslash-escape = false
+backslash-escape = true
 trim-last-separator = false
 
 [tikv-importer]
@@ -1173,6 +1173,16 @@ func splitPGArrayElements(s string) []string {
 	return elements
 }
 
+// escapeTSV escapes characters that would break tab-separated format.
+// TiDB Lightning CSV with backslash-escape handles these correctly.
+func escapeTSV(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	s = strings.ReplaceAll(s, "\r", "\\r")
+	s = strings.ReplaceAll(s, "\t", "\\t")
+	return s
+}
+
 func convertStringValue(s string) string {
 	// PG arrays use {elem1,elem2,...} syntax, JSON objects use {"key":"val"}.
 	// JSON already starts with {" (object) or [" (array).
@@ -1424,7 +1434,7 @@ func (m *Migrator) exportChunk(
 		}
 		record := make([]string, len(cols))
 		for i, val := range values {
-			record[i] = convertValue(val)
+			record[i] = escapeTSV(convertValue(val))
 		}
 		line := strings.Join(record, "\t") + "\n"
 		n, writeErr := bw.WriteString(line)
