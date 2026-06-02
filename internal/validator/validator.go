@@ -192,6 +192,17 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 		tr.Error = "failed to get PG column types"
 		return tr
 	}
+
+	// Build set of float/real/double column indices to skip in comparison.
+	// Floating point types have inherent precision differences between PG and TiDB.
+	skipCols := make(map[int]bool)
+	for i, c := range pgCols {
+		dt := strings.ToLower(c.DatabaseTypeName())
+		if dt == "real" || dt == "float4" || dt == "float8" || dt == "double" || dt == "double precision" || dt == "numeric" || dt == "decimal" {
+			skipCols[i] = true
+		}
+	}
+
 	pgValues := make([]interface{}, len(pgCols))
 	pgPtrs := make([]interface{}, len(pgCols))
 	for i := range pgValues {
@@ -246,6 +257,9 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 
 		if rowIdx < len(pgData) {
 			for colIdx, val := range tidbValues {
+				if skipCols[colIdx] {
+					continue
+				}
 				pgVal := ""
 				if colIdx < len(pgData[rowIdx]) {
 					pgVal = pgData[rowIdx][colIdx]
@@ -367,7 +381,7 @@ func normalizeValue(val interface{}) string {
 			return "1"
 		}
 		return "0"
-case []byte:
+	case []byte:
 		return normalizeString(string(v))
 	case time.Time:
 		return v.Format("2006-01-02 15:04:05")

@@ -786,9 +786,9 @@ func pgTypeToMySQL(dataType, udtName string) string {
 	case "date":
 		return "DATE"
 	case "timestamp", "timestamp without time zone":
-		return "DATETIME"
+		return "DATETIME(6)"
 	case "timestamp with time zone", "timestamptz":
-		return "DATETIME"
+		return "DATETIME(6)"
 	case "time", "time without time zone":
 		return "TIME"
 	case "bytea":
