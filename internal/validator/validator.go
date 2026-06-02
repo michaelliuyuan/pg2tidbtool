@@ -367,12 +367,8 @@ func normalizeValue(val interface{}) string {
 			return "1"
 		}
 		return "0"
-	case []byte:
-		s := string(v)
-		if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") {
-			s = normalizeJSON(s)
-		}
-		return s
+case []byte:
+		return normalizeString(string(v))
 	case time.Time:
 		return v.Format("2006-01-02 15:04:05")
 	case string:
