@@ -193,14 +193,18 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 		return tr
 	}
 
-	// Build set of float/real/double column indices to skip in comparison.
+	// Build sets of column indices to skip or trim in comparison.
 	// Floating point types have inherent precision differences between PG and TiDB.
+	// CHAR/VARCHAR/TEXT types may differ in trailing spaces (MySQL auto-trims CHAR).
 	skipCols := make(map[int]bool)
+	trimCols := make(map[int]bool)
 	for i, c := range pgCols {
 		dt := strings.ToLower(c.DatabaseTypeName())
-		if dt == "real" || dt == "float4" || dt == "float8" || dt == "double" || dt == "double precision" || dt == "numeric" || dt == "decimal" ||
-				dt == "character" || dt == "char" || dt == "bpchar" {
+		if dt == "real" || dt == "float4" || dt == "float8" || dt == "double" || dt == "double precision" || dt == "numeric" || dt == "decimal" {
 			skipCols[i] = true
+		}
+		if dt == "character" || dt == "char" || dt == "bpchar" || dt == "character varying" || dt == "varchar" || dt == "text" {
+			trimCols[i] = true
 		}
 	}
 
@@ -266,6 +270,10 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 					pgVal = pgData[rowIdx][colIdx]
 				}
 				tidbVal := normalizeValue(val)
+				if trimCols[colIdx] {
+					pgVal = strings.TrimRight(pgVal, " ")
+					tidbVal = strings.TrimRight(tidbVal, " ")
+				}
 				if pgVal != tidbVal {
 					mismatchCount++
 					colName := tidbCols[colIdx].Name()
