@@ -368,8 +368,11 @@ func normalizeValue(val interface{}) string {
 		}
 		return "0"
 	case []byte:
-		// Compare bytea/blobs as hex for cross-DB consistency
-		return fmt.Sprintf("%x", v)
+		s := string(v)
+		if strings.HasPrefix(s, "{") || strings.HasPrefix(s, "[") {
+			s = normalizeJSON(s)
+		}
+		return s
 	case time.Time:
 		return v.Format("2006-01-02 15:04:05")
 	case string:
