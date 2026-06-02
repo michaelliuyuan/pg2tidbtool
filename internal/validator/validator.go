@@ -101,6 +101,20 @@ func (v *Validator) Run(ctx context.Context, opts common.ValidateOpts) (*reporte
 
 	wg.Wait()
 
+	// Log summary of failed/warned tables for visibility
+	failTables := rpt.FailedTables()
+	if len(failTables) > 0 {
+		for _, t := range failTables {
+			logger.Warn("table validation FAILED",
+				zap.String("table", t.TableName),
+				zap.String("error", t.Error),
+				zap.Int64("diff", t.DiffRows))
+		}
+		logger.Warn("data validation summary",
+			zap.Int("failed", len(failTables)),
+			zap.Int("total", len(tables)))
+	}
+
 	rpt.Finish(rpt.OverallStatus(), fmt.Sprintf("validated %d tables at level %s", len(tables), opts.Level))
 
 	if opts.ReportFile != "" {

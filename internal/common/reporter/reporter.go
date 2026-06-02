@@ -129,6 +129,16 @@ func (r *Report) OverallStatus() Status {
 	return StatusPass
 }
 
+func (r *Report) FailedTables() []TableReport {
+	var result []TableReport
+	for _, t := range r.Tables {
+		if t.Status == StatusFail {
+			result = append(result, t)
+		}
+	}
+	return result
+}
+
 func (r *Report) SaveJSON(path string) error {
 	data, err := json.MarshalIndent(r, "", "  ")
 	if err != nil {
