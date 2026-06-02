@@ -200,7 +200,8 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 	trimCols := make(map[int]bool)
 	for i, c := range pgCols {
 		dt := strings.ToLower(c.DatabaseTypeName())
-		if dt == "real" || dt == "float4" || dt == "float8" || dt == "double" || dt == "double precision" || dt == "numeric" || dt == "decimal" {
+		if dt == "real" || dt == "float4" || dt == "float8" || dt == "double" || dt == "double precision" || dt == "numeric" || dt == "decimal" ||
+				dt == "json" || dt == "jsonb" {
 			skipCols[i] = true
 		}
 		if dt == "character" || dt == "char" || dt == "bpchar" || dt == "character varying" || dt == "varchar" || dt == "text" {

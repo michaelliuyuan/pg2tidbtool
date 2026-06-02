@@ -382,6 +382,15 @@ func (m *Migrator) importViaLightning(ctx context.Context, opts common.DataOpts,
 		return nil
 	}
 
+// Clean up stale Lightning checkpoint to avoid conflicts from previous failed runs
+	checkpointPath := filepath.Join(opts.TempDir, "tidb_lightning_checkpoint.pb")
+	if _, err := os.Stat(checkpointPath); err == nil {
+		logger.Info("removing stale Lightning checkpoint", zap.String("path", checkpointPath))
+		if err := os.Remove(checkpointPath); err != nil {
+			logger.Warn("failed to remove Lightning checkpoint", zap.Error(err))
+		}
+	}
+
 	for tbl, cnt := range chunkedTables {
 		logger.Info("chunked table detected for Lightning import",
 			zap.String("table", tbl),
