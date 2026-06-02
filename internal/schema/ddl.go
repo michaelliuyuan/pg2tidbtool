@@ -193,6 +193,9 @@ func convertDefaultValue(pgDefault string, pgType PGType) string {
 	case strings.Contains(strings.ToUpper(d), "NEXTVAL"):
 		return ""
 	case strings.Contains(strings.ToUpper(d), "CURRENT_TIMESTAMP"):
+		if pgType == PGTimestamp || pgType == PGTimestampTZ {
+			return "CURRENT_TIMESTAMP(6)"
+		}
 		return "CURRENT_TIMESTAMP"
 	case strings.ToUpper(d) == "TRUE":
 		return "1"
