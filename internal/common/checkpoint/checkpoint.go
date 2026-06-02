@@ -153,6 +153,7 @@ func (m *Manager) GetOrCreateTable(tableName string, totalRows int64) *TableChec
 		RowsTotal: totalRows,
 	}
 	m.data.Tables[tableName] = tc
+	m.save()
 	return tc
 }
 
@@ -165,6 +166,7 @@ func (m *Manager) UpdateTable(tableName string, fn func(tc *TableCheckpoint)) er
 		return fmt.Errorf("table %s not found in checkpoint", tableName)
 	}
 	fn(tc)
+	m.save()
 	return nil
 }
 
