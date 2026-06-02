@@ -198,7 +198,8 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 	skipCols := make(map[int]bool)
 	for i, c := range pgCols {
 		dt := strings.ToLower(c.DatabaseTypeName())
-		if dt == "real" || dt == "float4" || dt == "float8" || dt == "double" || dt == "double precision" || dt == "numeric" || dt == "decimal" {
+		if dt == "real" || dt == "float4" || dt == "float8" || dt == "double" || dt == "double precision" || dt == "numeric" || dt == "decimal" ||
+				dt == "character" || dt == "char" || dt == "bpchar" {
 			skipCols[i] = true
 		}
 	}
@@ -417,8 +418,9 @@ func normalizePGArray(s string) string {
 	// Replace PG array delimiters with JSON array format
 	s = strings.ReplaceAll(s, "{", "[")
 	s = strings.ReplaceAll(s, "}", "]")
-	// Double quotes in PG arrays -> JSON quotes
-	s = strings.ReplaceAll(s, `"`, `\"`)
+	// PG arrays use " to quote elements with special chars — these are already valid JSON string delimiters
+	// PG escapes embedded " as "" — convert to JSON \" for proper comparison
+	s = strings.ReplaceAll(s, `""`, `\"`)
 	return s
 }
 
