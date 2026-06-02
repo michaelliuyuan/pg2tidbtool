@@ -612,7 +612,7 @@ analyze = "off"
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start tidb-lightning: %w", err)
 	}
-	var srcPathRe = regexp.MustCompile(`\([^)]*\.go:\d+)`)
+	var srcPathRe = regexp.MustCompile(`\([^)]*\.go:\d+\)`)
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
