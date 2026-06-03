@@ -635,12 +635,7 @@ analyze = "off"
 		if strings.Contains(line, "[ERROR]") || strings.Contains(line, "[FATAL]") {
 			logger.Error("lightning: " + line)
 		} else if strings.Contains(line, "[WARN]") {
-			// Filter out noisy warnings that add no value
-			if !strings.Contains(line, "check table empty failed") &&
-				!strings.Contains(line, "currently only per-task configuration") &&
-				!strings.Contains(line, "no rows in result set") {
-				logger.Warn("lightning: " + line)
-			}
+			// Filter out all Lightning WARN logs - not useful for users viewing migration logs
 		} else if strings.Contains(line, "restore table `") ||
 			strings.Contains(line, "checksum for table") ||
 			strings.Contains(line, "the whole procedure") ||

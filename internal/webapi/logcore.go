@@ -1,6 +1,7 @@
 package webapi
 
 import (
+	"fmt"
 	"strings"
 	"sync/atomic"
 
@@ -64,7 +65,40 @@ func (c *TaskLogCore) Write(entry zapcore.Entry, fields []zapcore.Field) error {
 	if idx := strings.LastIndex(caller, "/"); idx >= 0 {
 		caller = caller[idx+1:]
 	}
-	c.collector.Append(c.taskID, ZapLevelString(entry.Level), entry.Message, caller)
+	message := entry.Message
+	if len(fields) > 0 {
+		var parts []string
+		for _, f := range fields {
+			switch f.Type {
+			case zapcore.StringType:
+				parts = append(parts, fmt.Sprintf("%s=%s", f.Key, f.String))
+			case zapcore.Int64Type, zapcore.Int32Type, zapcore.Uint64Type, zapcore.Uint32Type:
+				parts = append(parts, fmt.Sprintf("%s=%d", f.Key, f.Integer))
+			case zapcore.BoolType:
+				parts = append(parts, fmt.Sprintf("%s=%v", f.Key, f.Integer != 0))
+			case zapcore.ErrorType:
+				if err, ok := f.Interface.(error); ok {
+					parts = append(parts, fmt.Sprintf("%s=%s", f.Key, err.Error()))
+				} else {
+					parts = append(parts, fmt.Sprintf("%s=%v", f.Key, f.Interface))
+				}
+			case zapcore.Float64Type:
+				parts = append(parts, fmt.Sprintf("%s=%v", f.Key, f.Interface))
+			case zapcore.DurationType:
+				parts = append(parts, fmt.Sprintf("%s=%v", f.Key, f.Interface))
+			default:
+				if f.Interface != nil {
+					parts = append(parts, fmt.Sprintf("%s=%v", f.Key, f.Interface))
+				} else {
+					parts = append(parts, fmt.Sprintf("%s=%d", f.Key, f.Integer))
+				}
+			}
+		}
+		if len(parts) > 0 {
+			message += " (" + strings.Join(parts, ", ") + ")"
+		}
+	}
+	c.collector.Append(c.taskID, ZapLevelString(entry.Level), message, caller)
 	return nil
 }
 
