@@ -14,8 +14,27 @@ type Config struct {
 	Source    SourceConfig    `yaml:"source" json:"source"`
 	Target    TargetConfig    `yaml:"target" json:"target"`
 	Migration MigrationConfig `yaml:"migration" json:"migration"`
+	Compare   CompareConfig   `yaml:"compare" json:"compare"`
 	Logging   LoggingConfig   `yaml:"logging" json:"logging"`
 	Web       WebConfig       `yaml:"web" json:"web"`
+}
+
+// CompareConfig controls data comparison/validation behavior, especially for
+// tables without primary keys.
+type CompareConfig struct {
+	// NoPKStrategy selects the validation strategy for tables without primary keys:
+	//   "auto"       — auto-select based on table structure and row count (default)
+	//   "hash_group" — full row hash group counting (exact, detects missing/extra rows)
+	//   "aggregate"  — full table aggregate hash (fast yes/no check)
+	//   "bucket"     — hash-based bucketed comparison (for very large tables)
+	NoPKStrategy string `yaml:"no_pk_strategy" json:"noPkStrategy"`
+
+	// NoPKBucketCount is the number of buckets for the bucket strategy.
+	NoPKBucketCount int `yaml:"no_pk_bucket_count" json:"noPkBucketCount"`
+
+	// NoPKTableThreshold is the row count above which "auto" mode will choose
+	// bucket or aggregate instead of hash_group.
+	NoPKTableThreshold int64 `yaml:"no_pk_table_threshold" json:"noPkTableThreshold"`
 }
 
 type SourceConfig struct {
@@ -127,6 +146,11 @@ func DefaultConfig() *Config {
 			LargeTableThreshold: 1000000,
 			ChunkSize:           500000,
 			ChunkParallel:       4,
+			},
+		Compare: CompareConfig{
+			NoPKStrategy:       "auto",
+			NoPKBucketCount:    100,
+			NoPKTableThreshold: 1000000,
 		},
 		Logging: LoggingConfig{
 			Level:  "info",

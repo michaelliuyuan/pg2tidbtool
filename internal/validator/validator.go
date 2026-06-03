@@ -182,6 +182,41 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 		schema = "public"
 	}
 
+	// Detect table structure: does it have a primary key or unique index?
+	keyInfo, err := v.detectTableKey(ctx, pgDB, schema, table)
+	if err != nil {
+		logger := zap.L()
+		logger.Warn("failed to detect table key, assuming no PK", zap.String("table", table), zap.Error(err))
+		keyInfo = &TableKeyInfo{} // treat as no-PK
+	}
+	needsNoPKStrategy := !keyInfo.HasPK && !keyInfo.HasUniqueIndex
+
+	// For no-PK tables, decide which strategy to use
+	if needsNoPKStrategy {
+		strategy := v.cfg.Compare.NoPKStrategy
+		if strategy == "" {
+			strategy = "auto"
+		}
+
+		// Auto-select strategy based on table size
+		if strategy == "auto" {
+			threshold := v.cfg.Compare.NoPKTableThreshold
+			if threshold <= 0 {
+				threshold = 1000000
+			}
+			if tr.SourceRows <= threshold {
+				strategy = "hash_group"
+			} else {
+				strategy = "aggregate" // Phase 2 will implement this
+			}
+		}
+
+		if strategy == "hash_group" {
+			return v.validateSamplingWithHashGroup(ctx, pgDB, tidbDB, table, ratio, tr, schema)
+		}
+		// Other strategies (aggregate, bucket) fall through to existing logic (Phase 2)
+	}
+
 	sampleSize := int(float64(tr.SourceRows) * ratio)
 	if sampleSize < 1 {
 		sampleSize = 1
@@ -511,6 +546,76 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 	tr.Suggestion = fmt.Sprintf("sampled %d rows (%.1f%%), %d mismatches", len(pgData), ratio*100, mismatchCount)
 	return tr
 
+}
+
+// validateSamplingWithHashGroup handles no-PK table validation using hash group
+// comparison. It samples rows from PG, then uses validateHashGroup to compare
+// the multiset of row hashes against TiDB.
+func (v *Validator) validateSamplingWithHashGroup(ctx context.Context, pgDB, tidbDB *sql.DB, table string, ratio float64, tr reporter.TableReport, schema string) reporter.TableReport {
+	logger := zap.L()
+
+	sampleSize := int(float64(tr.SourceRows) * ratio)
+	if sampleSize < 1 {
+		sampleSize = 1
+	}
+	if sampleSize > 1000 {
+		sampleSize = 1000
+	}
+
+	offset := rand.Int63n(tr.SourceRows - int64(sampleSize) + 1)
+
+	pgQuery := fmt.Sprintf("SELECT * FROM %s.%s LIMIT %d OFFSET %d",
+		quotePG(schema), quotePG(table), sampleSize, offset)
+	pgRows, err := pgDB.QueryContext(ctx, pgQuery)
+	if err != nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = fmt.Sprintf("sample source (no-PK): %v", err)
+		return tr
+	}
+	defer pgRows.Close()
+
+	pgCols, _ := pgRows.ColumnTypes()
+	if pgCols == nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = "failed to get PG column types"
+		return tr
+	}
+
+	// Build skip/trim column sets (same logic as validateSampling)
+	skipCols := make(map[int]bool)
+	for i, c := range pgCols {
+		dt := strings.ToLower(c.DatabaseTypeName())
+		if dt == "real" || dt == "float4" || dt == "float8" || dt == "double" || dt == "double precision" || dt == "numeric" || dt == "decimal" ||
+			strings.Contains(dt, "json") {
+			skipCols[i] = true
+		}
+	}
+
+	pgValues := make([]interface{}, len(pgCols))
+	pgPtrs := make([]interface{}, len(pgCols))
+	for i := range pgValues {
+		pgPtrs[i] = &pgValues[i]
+	}
+
+	var pgData [][]string
+	for pgRows.Next() {
+		if err := pgRows.Scan(pgPtrs...); err != nil {
+			tr.Status = reporter.StatusFail
+			tr.Error = fmt.Sprintf("scan PG row: %v", err)
+			return tr
+		}
+		row := make([]string, len(pgCols))
+		for i, val := range pgValues {
+			row[i] = normalizeValue(val)
+		}
+		pgData = append(pgData, row)
+	}
+
+	logger.Info("no-PK table: sampled PG rows for hash group comparison",
+		zap.String("table", table),
+		zap.Int("sample_size", len(pgData)))
+
+	return v.validateHashGroup(ctx, pgDB, tidbDB, table, tr, pgCols, pgData, skipCols)
 }
 
 func (v *Validator) validateChecksum(ctx context.Context, pgDB, tidbDB *sql.DB, table string) reporter.TableReport {
