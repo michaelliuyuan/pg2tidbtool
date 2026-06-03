@@ -549,23 +549,16 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 }
 
 // validateSamplingWithHashGroup handles no-PK table validation using hash group
-// comparison. It samples rows from PG, then uses validateHashGroup to compare
-// the multiset of row hashes against TiDB.
+// comparison. It queries ALL rows from PG (hash_group is an exact strategy,
+// not a sampled one), then uses validateHashGroup to compare the multiset of
+// row hashes against TiDB's full table.
 func (v *Validator) validateSamplingWithHashGroup(ctx context.Context, pgDB, tidbDB *sql.DB, table string, ratio float64, tr reporter.TableReport, schema string) reporter.TableReport {
 	logger := zap.L()
 
-	sampleSize := int(float64(tr.SourceRows) * ratio)
-	if sampleSize < 1 {
-		sampleSize = 1
-	}
-	if sampleSize > 1000 {
-		sampleSize = 1000
-	}
-
-	offset := rand.Int63n(tr.SourceRows - int64(sampleSize) + 1)
-
-	pgQuery := fmt.Sprintf("SELECT * FROM %s.%s LIMIT %d OFFSET %d",
-		quotePG(schema), quotePG(table), sampleSize, offset)
+	// Hash group is an exact strategy — query the full PG table, not a sample.
+	// Sampling would cause mismatches because TiDB is also queried in full.
+	pgQuery := fmt.Sprintf("SELECT * FROM %s.%s",
+		quotePG(schema), quotePG(table))
 	pgRows, err := pgDB.QueryContext(ctx, pgQuery)
 	if err != nil {
 		tr.Status = reporter.StatusFail
@@ -611,9 +604,9 @@ func (v *Validator) validateSamplingWithHashGroup(ctx context.Context, pgDB, tid
 		pgData = append(pgData, row)
 	}
 
-	logger.Info("no-PK table: sampled PG rows for hash group comparison",
+	logger.Info("no-PK table: querying full PG table for hash group comparison",
 		zap.String("table", table),
-		zap.Int("sample_size", len(pgData)))
+		zap.Int("row_count", len(pgData)))
 
 	return v.validateHashGroup(ctx, pgDB, tidbDB, table, tr, pgCols, pgData, skipCols)
 }
