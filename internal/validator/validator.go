@@ -843,6 +843,16 @@ func normalizeValue(val interface{}) string {
 			return "1"
 		}
 		return "0"
+	case float64:
+		// Use strconv.FormatFloat with 'f' and -1 precision to preserve
+		// full float64 precision (e.g., 123.4567 not "123").
+		return normalizeString(strconv.FormatFloat(v, 'f', -1, 64))
+	case float32:
+		return normalizeString(strconv.FormatFloat(float64(v), 'f', -1, 32))
+	case int64:
+		return normalizeString(strconv.FormatInt(v, 10))
+	case int:
+		return normalizeString(strconv.Itoa(v))
 	case []byte:
 		return normalizeString(string(v))
 	case time.Time:
