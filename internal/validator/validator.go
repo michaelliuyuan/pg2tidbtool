@@ -248,46 +248,53 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 // The Go code below should be inserted at the right indentation level.
 
 
-	// Get first column name for key-based lookup in TiDB
-	firstColName := "row_num"
-	if len(pgCols) > 0 {
-		firstColName = pgCols[0].Name()
-	}
-
-	// Check if first column has NULL values (need different comparison strategy)
-	firstColHasNull := false
-	for _, row := range pgData {
-		if len(row) > 0 && row[0] == "\\N" {
-			firstColHasNull = true
+	// Find the best key column: first non-skipped column with all non-NULL values in the sample
+	keyColIdx := -1
+	for colIdx := 0; colIdx < len(pgCols); colIdx++ {
+		if skipCols[colIdx] {
+			continue
+		}
+		allNonNULL := true
+		for _, row := range pgData {
+			if colIdx >= len(row) || row[colIdx] == "\\N" {
+				allNonNULL = false
+				break
+			}
+		}
+		if allNonNULL {
+			keyColIdx = colIdx
 			break
 		}
 	}
 
-	// Build lookup map from PG data by first column value
+	// Build lookup map from PG data by key column value
 	pgMap := make(map[string][]string)
 	for _, row := range pgData {
 		if len(row) == 0 {
 			continue
 		}
-		pgMap[row[0]] = row
+		if keyColIdx >= 0 && keyColIdx < len(row) {
+			pgMap[row[keyColIdx]] = row
+		}
 	}
 
 	var mismatchCount int
 	var mismatchDetails []string
 
-	if !firstColHasNull {
+	if keyColIdx >= 0 {
 		// Key-based comparison: query TiDB for exact rows matching PG sample keys
+		keyColName := pgCols[keyColIdx].Name()
 		var whereParts []string
 		for _, row := range pgData {
-			if len(row) > 0 && row[0] != "\\N" {
-				escaped := strings.ReplaceAll(row[0], "'", "\\'")
+			if keyColIdx < len(row) && row[keyColIdx] != "\\N" {
+				escaped := strings.ReplaceAll(row[keyColIdx], "'", "\\'")
 				whereParts = append(whereParts, fmt.Sprintf("'%s'", escaped))
 			}
 		}
 
 		if len(whereParts) > 0 {
 			tidbQuery := fmt.Sprintf("SELECT * FROM %s WHERE %s IN (%s)",
-				quoteMySQL(table), quoteMySQL(firstColName), strings.Join(whereParts, ","))
+				quoteMySQL(table), quoteMySQL(keyColName), strings.Join(whereParts, ","))
 			tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
 			if err != nil {
 				tr.Status = reporter.StatusFail
@@ -340,7 +347,7 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 					continue
 				}
 
-				key := tidbRow[0]
+				key := tidbRow[keyColIdx]
 				foundInTiDB[key] = true
 
 				pgRow, found := pgMap[key]
@@ -376,9 +383,9 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 			// Check for PG keys not found in TiDB
 			for _, row := range pgData {
 				if len(row) > 0 && row[0] != "\\N" {
-					if !foundInTiDB[row[0]] {
+					if !foundInTiDB[row[keyColIdx]] {
 						mismatchCount++
-						mismatchDetails = append(mismatchDetails, fmt.Sprintf("key %q in PG but not found in TiDB", truncate(row[0], 40)))
+						mismatchDetails = append(mismatchDetails, fmt.Sprintf("key %q in PG but not found in TiDB", truncate(row[keyColIdx], 40)))
 					}
 				}
 			}
