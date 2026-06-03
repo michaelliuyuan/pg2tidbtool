@@ -245,84 +245,191 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 		pgData = append(pgData, row)
 	}
 
-	tidbQuery := fmt.Sprintf("SELECT * FROM %s ORDER BY 1 LIMIT %d OFFSET %d",
-		quoteMySQL(table), sampleSize, offset)
-	tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
-	if err != nil {
-		tr.Status = reporter.StatusFail
-		tr.Error = fmt.Sprintf("sample target: %v", err)
-		return tr
-	}
-	defer tidbRows.Close()
+// The Go code below should be inserted at the right indentation level.
 
-	tidbCols, _ := tidbRows.ColumnTypes()
-	if tidbCols == nil {
-		tr.Status = reporter.StatusFail
-		tr.Error = "failed to get TiDB column types"
-		return tr
-	}
-	tidbValues := make([]interface{}, len(tidbCols))
-	tidbPtrs := make([]interface{}, len(tidbCols))
-	for i := range tidbValues {
-		tidbPtrs[i] = &tidbValues[i]
+
+	// Get first column name for key-based lookup in TiDB
+	firstColName := "row_num"
+	if len(pgCols) > 0 {
+		firstColName = pgCols[0].Name()
 	}
 
-	// Build lookup map from PG data by first column value for key-based comparison.
-	// This avoids false positives from collation/ordering differences between PG and TiDB.
-	pgMap := make(map[string]int)
-	for i, row := range pgData {
-		if len(row) > 0 {
-			pgMap[row[0]] = i
+	// Check if first column has NULL values (need different comparison strategy)
+	firstColHasNull := false
+	for _, row := range pgData {
+		if len(row) > 0 && row[0] == "\\N" {
+			firstColHasNull = true
+			break
 		}
+	}
+
+	// Build lookup map from PG data by first column value
+	pgMap := make(map[string][]string)
+	for _, row := range pgData {
+		if len(row) == 0 {
+			continue
+		}
+		pgMap[row[0]] = row
 	}
 
 	var mismatchCount int
 	var mismatchDetails []string
-	for tidbRows.Next() {
-		if err := tidbRows.Scan(tidbPtrs...); err != nil {
+
+	if !firstColHasNull {
+		// Key-based comparison: query TiDB for exact rows matching PG sample keys
+		var whereParts []string
+		for _, row := range pgData {
+			if len(row) > 0 && row[0] != "\\N" {
+				escaped := strings.ReplaceAll(row[0], "'", "\\'")
+				whereParts = append(whereParts, fmt.Sprintf("'%s'", escaped))
+			}
+		}
+
+		if len(whereParts) > 0 {
+			tidbQuery := fmt.Sprintf("SELECT * FROM %s WHERE %s IN (%s)",
+				quoteMySQL(table), quoteMySQL(firstColName), strings.Join(whereParts, ","))
+			tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
+			if err != nil {
+				tr.Status = reporter.StatusFail
+				tr.Error = fmt.Sprintf("sample target: %v", err)
+				return tr
+			}
+			defer tidbRows.Close()
+
+			tidbCols, _ := tidbRows.ColumnTypes()
+			if tidbCols == nil {
+				tr.Status = reporter.StatusFail
+				tr.Error = "failed to get TiDB column types"
+				return tr
+			}
+			tidbValues := make([]interface{}, len(tidbCols))
+			tidbPtrs := make([]interface{}, len(tidbCols))
+			for i := range tidbValues {
+				tidbPtrs[i] = &tidbValues[i]
+			}
+
+			// Build skip/trim column maps for TiDB column types
+			tidbSkipCols := make(map[int]bool)
+			tidbTrimCols := make(map[int]bool)
+			for i, c := range tidbCols {
+				dt := strings.ToLower(c.DatabaseTypeName())
+				if dt == "real" || dt == "float" || dt == "float4" || dt == "float8" || dt == "double" || dt == "double precision" || dt == "numeric" || dt == "decimal" || strings.Contains(dt, "json") {
+					tidbSkipCols[i] = true
+				}
+				if dt == "character" || dt == "char" || dt == "bpchar" || dt == "character varying" || dt == "varchar" || dt == "text" {
+					tidbTrimCols[i] = true
+				}
+			}
+
+			// Track which PG keys were found in TiDB
+			foundInTiDB := make(map[string]bool)
+
+			for tidbRows.Next() {
+				if err := tidbRows.Scan(tidbPtrs...); err != nil {
+					tr.Status = reporter.StatusFail
+					tr.Error = fmt.Sprintf("scan TiDB row: %v", err)
+					return tr
+				}
+
+				// Normalize all TiDB values
+				tidbRow := make([]string, len(tidbValues))
+				for i, val := range tidbValues {
+					tidbRow[i] = normalizeValue(val)
+				}
+				if len(tidbRow) == 0 {
+					continue
+				}
+
+				key := tidbRow[0]
+				foundInTiDB[key] = true
+
+				pgRow, found := pgMap[key]
+				if !found {
+					// TiDB has a row not in PG sample (shouldn't happen with WHERE IN)
+					mismatchCount++
+					mismatchDetails = append(mismatchDetails, fmt.Sprintf("key %q in TiDB but not in PG sample", truncate(key, 40)))
+					continue
+				}
+
+				// Compare column by column
+				for colIdx, tidbVal := range tidbRow {
+					if tidbSkipCols[colIdx] {
+						continue
+					}
+					pgVal := ""
+					if colIdx < len(pgRow) {
+						pgVal = pgRow[colIdx]
+					}
+					if tidbTrimCols[colIdx] {
+						pgVal = strings.TrimRight(pgVal, " ")
+						tidbVal = strings.TrimRight(tidbVal, " ")
+					}
+					if pgVal != tidbVal {
+						mismatchCount++
+						colName := tidbCols[colIdx].Name()
+						mismatchDetails = append(mismatchDetails, fmt.Sprintf("key=%s col %q: PG=%q TiDB=%q", truncate(key, 20), colName, truncate(pgVal, 80), truncate(tidbVal, 80)))
+						break
+					}
+				}
+			}
+
+			// Check for PG keys not found in TiDB
+			for _, row := range pgData {
+				if len(row) > 0 && row[0] != "\\N" {
+					if !foundInTiDB[row[0]] {
+						mismatchCount++
+						mismatchDetails = append(mismatchDetails, fmt.Sprintf("key %q in PG but not found in TiDB", truncate(row[0], 40)))
+					}
+				}
+			}
+		}
+	} else {
+		// Fallback for NULL first column: use positional comparison
+		// (less reliable but necessary when key column is NULL)
+		tidbQuery := fmt.Sprintf("SELECT * FROM %s LIMIT %d OFFSET %d",
+			quoteMySQL(table), sampleSize, offset)
+		tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
+		if err != nil {
 			tr.Status = reporter.StatusFail
-			tr.Error = fmt.Sprintf("scan TiDB row: %v", err)
+			tr.Error = fmt.Sprintf("sample target: %v", err)
 			return tr
 		}
+		defer tidbRows.Close()
 
-		// Normalize all TiDB values
-		tidbRow := make([]string, len(tidbValues))
-		for i, val := range tidbValues {
-			tidbRow[i] = normalizeValue(val)
+		tidbCols, _ := tidbRows.ColumnTypes()
+		tidbValues := make([]interface{}, len(tidbCols))
+		tidbPtrs := make([]interface{}, len(tidbCols))
+		for i := range tidbValues {
+			tidbPtrs[i] = &tidbValues[i]
 		}
-
-		if len(tidbRow) == 0 {
-			continue
-		}
-
-		// Look up matching PG row by first column value (key-based)
-		key := tidbRow[0]
-		pgIdx, found := pgMap[key]
-		if !found {
-			mismatchCount++
-			mismatchDetails = append(mismatchDetails, fmt.Sprintf("key %q not found in PG sample", truncate(key, 40)))
-			continue
-		}
-
-		pgRow := pgData[pgIdx]
-		for colIdx, tidbVal := range tidbRow {
-			if skipCols[colIdx] {
+		rowIdx := 0
+		for tidbRows.Next() {
+			if err := tidbRows.Scan(tidbPtrs...); err != nil {
 				continue
 			}
-			pgVal := ""
-			if colIdx < len(pgRow) {
-				pgVal = pgRow[colIdx]
+			if rowIdx < len(pgData) {
+				for colIdx, val := range tidbValues {
+					if skipCols[colIdx] {
+						continue
+					}
+					pgVal := ""
+					if colIdx < len(pgData[rowIdx]) {
+						pgVal = pgData[rowIdx][colIdx]
+					}
+					tidbVal := normalizeValue(val)
+					if trimCols[colIdx] {
+						pgVal = strings.TrimRight(pgVal, " ")
+						tidbVal = strings.TrimRight(tidbVal, " ")
+					}
+					if pgVal != tidbVal {
+						mismatchCount++
+						colName := tidbCols[colIdx].Name()
+						mismatchDetails = append(mismatchDetails, fmt.Sprintf("row %d col %q: PG=%q TiDB=%q", rowIdx+int(offset)+1, colName, truncate(pgVal, 80), truncate(tidbVal, 80)))
+						break
+					}
+				}
 			}
-			if trimCols[colIdx] {
-				pgVal = strings.TrimRight(pgVal, " ")
-				tidbVal = strings.TrimRight(tidbVal, " ")
-			}
-			if pgVal != tidbVal {
-				mismatchCount++
-				colName := tidbCols[colIdx].Name()
-				mismatchDetails = append(mismatchDetails, fmt.Sprintf("key=%s col %q: PG=%q TiDB=%q", truncate(key, 20), colName, truncate(pgVal, 80), truncate(tidbVal, 80)))
-				break
-			}
+			rowIdx++
 		}
 	}
 
@@ -339,6 +446,7 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 	}
 	tr.Suggestion = fmt.Sprintf("sampled %d rows (%.1f%%), %d mismatches", len(pgData), ratio*100, mismatchCount)
 	return tr
+
 }
 
 func (v *Validator) validateChecksum(ctx context.Context, pgDB, tidbDB *sql.DB, table string) reporter.TableReport {
