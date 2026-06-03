@@ -808,7 +808,7 @@ func normalizeValue(val interface{}) string {
 	case []byte:
 		return normalizeString(string(v))
 	case time.Time:
-		return v.Format("2006-01-02 15:04:05")
+		return v.UTC().Format("2006-01-02 15:04:05")
 	case string:
 		return normalizeString(v)
 	case fmt.Stringer:
@@ -837,10 +837,29 @@ func normalizeDecimalString(s string) string {
 	return s
 }
 
+// timestampRe matches common timestamp formats: "2006-01-02 15:04:05" with optional
+// fractional seconds ".123456" and optional timezone "Z" or "+08:00".
+var timestampRe = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(\.\d+)?(.*)$`)
+
+// normalizeTimestampString strips fractional seconds and normalizes timezone from
+// timestamp-looking strings, so both PG and TiDB produce the same value.
+func normalizeTimestampString(s string) string {
+	m := timestampRe.FindStringSubmatch(s)
+	if m == nil {
+		return s
+	}
+	// Return just the base timestamp without fractional seconds or timezone suffix
+	return m[1]
+}
+
 func normalizeString(s string) string {
 	// Normalize decimal numbers: strip trailing zeros so "10.50" and "10.5"
 	// compare equal. This handles PG (string "10.50") vs TiDB (float64->"10.5").
 	s = normalizeDecimalString(s)
+
+	// Normalize timestamps: strip fractional seconds and timezone suffix
+	// so "2024-01-01 12:30:00.000000" and "2024-01-01 12:30:00" compare equal.
+	s = normalizeTimestampString(s)
 
 	// Normalize UUID to lowercase
 	s = uuidRe.ReplaceAllStringFunc(s, func(m string) string {

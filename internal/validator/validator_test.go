@@ -44,3 +44,26 @@ func TestNormalizeDecimalString(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeTimestampString(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"2024-01-01 12:30:00", "2024-01-01 12:30:00"},
+		{"2024-01-01 12:30:00.000000", "2024-01-01 12:30:00"},
+		{"2024-01-01 12:30:00.123456", "2024-01-01 12:30:00"},
+		{"2024-01-01 12:30:00.999", "2024-01-01 12:30:00"},
+		{"2024-01-01 12:30:00Z", "2024-01-01 12:30:00"},
+		{"2024-01-01 12:30:00+08:00", "2024-01-01 12:30:00"},
+		{"2024-01-01 12:30:00.000000+08:00", "2024-01-01 12:30:00"},
+		{"hello", "hello"},
+		{"12345", "12345"},
+	}
+	for _, tt := range tests {
+		result := normalizeTimestampString(tt.input)
+		if result != tt.expected {
+			t.Errorf("normalizeTimestampString(%q) = %q, want %q", tt.input, result, tt.expected)
+		}
+	}
+}
