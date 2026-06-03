@@ -116,6 +116,10 @@ export interface CreateTaskRequest {
     skip_data: boolean
     skip_validate: boolean
     target_policy: string
+    compare_mode: string
+    sample_ratio: number
+    checksum_chunk_size: number
+    checksum_parallel: number
   }
 }
 

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, type FormRules } from 'element-plus'
 import apiClient from '../api'
-import type { ElTable } from 'element-plus'
+
 
 const router = useRouter()
 const loading = ref(false)
@@ -13,7 +13,7 @@ const availableTables = ref<{name: string; row_estimate: number}[]>([])
 const loadingTables = ref(false)
 const tableSearch = ref('')
 const selectedTables = ref<string[]>([])
-const tableRef = ref<InstanceType<typeof ElTable> | null>(null)
+const tableRef = ref<any>(null)
 
 const form = reactive({
   name: '',
@@ -46,6 +46,10 @@ const form = reactive({
     skip_data: false,
     skip_validate: false,
     target_policy: 'insert',
+		compare_mode: 'sample',
+		sample_ratio: 0.01,
+		checksum_chunk_size: 50000,
+		checksum_parallel: 4,
   },
 })
 
@@ -119,6 +123,14 @@ onMounted(() => {
     } catch {}
   }
 })
+
+
+const compareModes = [
+  { value: 'quick', label: '\u26A1 快速', color: '#67c23a', desc: '仅行数估算，最快' },
+  { value: 'sample', label: '\uD83D\uDDD1 采样', color: '#409eff', desc: '行数+随机采样（推荐）' },
+  { value: 'checksum', label: '\uD83D\uDFE1 校验', color: '#e6a23c', desc: '行数+分块Hash' },
+  { value: 'full', label: '\uD83D\uDFE5 全量', color: '#f56c6c', desc: '全部验证，最慢' },
+]
 
 const rules: FormRules = {
   'source.host': [{ required: true, message: '请输入源数据库地址', trigger: 'blur' }],
@@ -229,6 +241,10 @@ async function submit() {
         skip_data: form.opts.skip_data,
         skip_validate: form.opts.skip_validate,
         target_policy: form.opts.target_policy,
+        compare_mode: form.opts.compare_mode,
+        sample_ratio: form.opts.sample_ratio,
+        checksum_chunk_size: form.opts.checksum_chunk_size,
+        checksum_parallel: form.opts.checksum_parallel,
       },
     })
     ElMessage.success('迁移任务创建成功')
@@ -426,6 +442,37 @@ function prevStep() {
               重复迁移时如何处理目标库已有数据。选择"先清空表"会删除表内数据但保留结构，"先删除表"会完全重建表。
             </div>
           </el-form-item>
+          <el-divider>数据对比模式</el-divider>
+          <el-form-item label="对比模式">
+            <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+              <div
+                v-for="m in compareModes" :key="m.value"
+                @click="form.opts.compare_mode = m.value"
+                :style="{
+                  border: form.opts.compare_mode === m.value ? '2px solid ' + m.color : '2px solid #dcdfe6',
+                  borderRadius: '8px',
+                  padding: '12px 16px',
+                  cursor: 'pointer',
+                  minWidth: '140px',
+                  transition: 'all 0.2s',
+                  background: form.opts.compare_mode === m.value ? m.color + '10' : '#fff',
+                }"
+              >
+                <div style="font-weight: bold; font-size: 14px;">{{ m.label }}</div>
+                <div style="color: #909399; font-size: 12px; margin-top: 4px;">{{ m.desc }}</div>
+              </div>
+            </div>
+          </el-form-item>
+          <el-form-item v-if="form.opts.compare_mode === 'sample'" label="采样率">
+            <el-slider v-model="form.opts.sample_ratio" :min="0.001" :max="1" :step="0.001" :format-tooltip="(v: number) => (v * 100).toFixed(1) + '%'" style="width: 300px;" />
+          </el-form-item>
+          <el-form-item v-if="form.opts.compare_mode === 'checksum'" label="分块大小">
+            <el-input-number v-model="form.opts.checksum_chunk_size" :min="1000" :step="10000" />
+            <span style="color: #909399; font-size: 12px; margin-left: 8px;">每块的行数</span>
+          </el-form-item>
+          <el-form-item v-if="form.opts.compare_mode === 'checksum'" label="并行数">
+            <el-input-number v-model="form.opts.checksum_parallel" :min="1" :max="16" />
+          </el-form-item>
           <el-divider>跳过阶段（高级）</el-divider>
           <el-form-item label="跳过预检">
             <el-switch v-model="form.opts.skip_precheck" />
@@ -449,6 +496,7 @@ function prevStep() {
             <el-descriptions-item label="源数据库">{{ form.source.host }}:{{ form.source.port }}/{{ form.source.database }}</el-descriptions-item>
             <el-descriptions-item label="目标数据库">{{ form.target.host }}:{{ form.target.port }}/{{ form.target.database }}</el-descriptions-item>
             <el-descriptions-item label="迁移表数">{{ selectedTables.length > 0 ? selectedTables.length : '全部 (' + availableTables.length + ')' }}</el-descriptions-item>
+            <el-descriptions-item label="对比模式">{{ compareModes.find(m => m.value === form.opts.compare_mode)?.label }}</el-descriptions-item>
             <el-descriptions-item label="使用 Lightning">{{ form.opts.use_lightning ? '是' : '否' }}</el-descriptions-item>
             <el-descriptions-item label="数据冲突策略">
               {{ form.opts.target_policy === 'truncate' ? '先清空表' : form.opts.target_policy === 'drop' ? '先删除表' : '直接插入' }}

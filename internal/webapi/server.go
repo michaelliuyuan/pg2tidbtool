@@ -393,8 +393,12 @@ type MigrationOptsBody struct {
 	SkipPrecheck  bool     `json:"skip_precheck"`
 	SkipSchema    bool     `json:"skip_schema"`
 	SkipData      bool     `json:"skip_data"`
-	SkipValidate  bool     `json:"skip_validate"`
-	TargetPolicy  string   `json:"target_policy"`
+	SkipValidate        bool    `json:"skip_validate"`
+	TargetPolicy        string  `json:"target_policy"`
+	CompareMode         string  `json:"compare_mode"`
+	SampleRatio         float64 `json:"sample_ratio"`
+	ChecksumChunkSize   int64   `json:"checksum_chunk_size"`
+	ChecksumParallel    int     `json:"checksum_parallel"`
 }
 
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
