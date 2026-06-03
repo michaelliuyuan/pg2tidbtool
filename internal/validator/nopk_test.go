@@ -85,18 +85,48 @@ func TestComputeRowHash(t *testing.T) {
 	_ = h4
 }
 
-func TestIsFloatType(t *testing.T) {
-	floatTypes := []string{"real", "float", "float4", "float8", "double", "double precision", "numeric", "decimal"}
+func TestIsApproximateFloatType(t *testing.T) {
+	// Only approximate float types should be skipped
+	floatTypes := []string{"real", "float", "float4", "float8", "double", "double precision"}
 	for _, dt := range floatTypes {
-		if !isFloatType(dt) {
-			t.Errorf("isFloatType(%q) should be true", dt)
+		if !isApproximateFloatType(dt) {
+			t.Errorf("isApproximateFloatType(%q) should be true", dt)
+		}
+	}
+
+	// DECIMAL and NUMERIC are exact types — should NOT be skipped
+	exactTypes := []string{"numeric", "decimal"}
+	for _, dt := range exactTypes {
+		if isApproximateFloatType(dt) {
+			t.Errorf("isApproximateFloatType(%q) should be false (exact type)", dt)
 		}
 	}
 
 	nonFloatTypes := []string{"integer", "varchar", "text", "timestamp", "bigint"}
 	for _, dt := range nonFloatTypes {
-		if isFloatType(dt) {
-			t.Errorf("isFloatType(%q) should be false", dt)
+		if isApproximateFloatType(dt) {
+			t.Errorf("isApproximateFloatType(%q) should be false", dt)
 		}
+	}
+}
+
+func TestBucketOf(t *testing.T) {
+	// Deterministic: same hash always maps to same bucket
+	h := "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+	b1 := bucketOf(h, 100)
+	b2 := bucketOf(h, 100)
+	if b1 != b2 {
+		t.Errorf("bucketOf should be deterministic: %d != %d", b1, b2)
+	}
+	if b1 < 0 || b1 >= 100 {
+		t.Errorf("bucket out of range: %d", b1)
+	}
+
+	// Different hashes may map to different buckets
+	h2 := "ffffffffffffffffffffffffffffffff"
+	b3 := bucketOf(h2, 100)
+	// Just verify it's in range
+	if b3 < 0 || b3 >= 100 {
+		t.Errorf("bucket out of range: %d", b3)
 	}
 }

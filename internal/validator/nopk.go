@@ -203,7 +203,7 @@ func (v *Validator) validateHashGroup(ctx context.Context, pgDB, tidbDB *sql.DB,
 		}
 		// Check if this column is skipped in TiDB
 		dt := strings.ToLower(tidbCols[idx].DatabaseTypeName())
-		if isFloatType(dt) || strings.Contains(dt, "json") {
+		if isApproximateFloatType(dt) || strings.Contains(dt, "json") {
 			continue
 		}
 		tidbHashCols = append(tidbHashCols, tidbColMapping{tidbIdx: idx, name: name})
@@ -308,8 +308,298 @@ func computeTiDBRowHash(row []string, hashCols []tidbColMapping) string {
 	return fmt.Sprintf("%x", md5.Sum([]byte(buf.String())))
 }
 
-// isFloatType checks if a database type name is a floating-point type.
-func isFloatType(dt string) bool {
+// isApproximateFloatType checks if a database type name is an approximate
+// floating-point type that has inherent precision differences between PG and TiDB.
+// DECIMAL/NUMERIC are exact types and should NOT be skipped — they have identical
+// precision in both databases.
+func isApproximateFloatType(dt string) bool {
 	return dt == "real" || dt == "float" || dt == "float4" || dt == "float8" ||
-		dt == "double" || dt == "double precision" || dt == "numeric" || dt == "decimal"
+		dt == "double" || dt == "double precision"
+}
+
+// validateAggregateHash computes a single aggregate hash for each side (PG and TiDB)
+// by sorting all individual row hashes and hashing the concatenation. This gives a
+// fast yes/no answer: if the aggregate hashes match, the tables are identical.
+// If they differ, the caller should fall back to hash_group or bucket for details.
+func (v *Validator) validateAggregateHash(ctx context.Context, pgDB, tidbDB *sql.DB, table string, tr reporter.TableReport, pgCols []*sql.ColumnType, pgData [][]string, skipCols map[int]bool) reporter.TableReport {
+	logger := zap.L()
+	logger.Info("using aggregate hash validation for no-PK table", zap.String("table", table))
+
+	schema := v.cfg.Source.Schema
+	if schema == "" {
+		schema = "public"
+	}
+
+	// Build sorted column list for consistent hashing
+	pgColNameToIdx := make(map[string]int)
+	var pgColNames []string
+	for i, c := range pgCols {
+		name := c.Name()
+		pgColNames = append(pgColNames, name)
+		pgColNameToIdx[strings.ToLower(name)] = i
+	}
+	sort.Strings(pgColNames)
+
+	var hashCols []colMapping
+	for _, name := range pgColNames {
+		idx := pgColNameToIdx[strings.ToLower(name)]
+		if skipCols[idx] {
+			continue
+		}
+		hashCols = append(hashCols, colMapping{pgIdx: idx, name: name})
+	}
+
+	// Compute sorted list of PG row hashes
+	pgHashes := make([]string, 0, len(pgData))
+	for _, row := range pgData {
+		pgHashes = append(pgHashes, computeRowHash(row, hashCols))
+	}
+	sort.Strings(pgHashes)
+	pgAggregate := fmt.Sprintf("%x", md5.Sum([]byte(strings.Join(pgHashes, ","))))
+
+	// Query TiDB full table
+	tidbQuery := fmt.Sprintf("SELECT * FROM %s", quoteMySQL(table))
+	tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
+	if err != nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = fmt.Sprintf("aggregate hash: query TiDB: %v", err)
+		return tr
+	}
+	defer tidbRows.Close()
+
+	tidbCols, _ := tidbRows.ColumnTypes()
+	if tidbCols == nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = "aggregate hash: failed to get TiDB column types"
+		return tr
+	}
+
+	tidbColNameToIdx := make(map[string]int)
+	for i, c := range tidbCols {
+		tidbColNameToIdx[strings.ToLower(c.Name())] = i
+	}
+
+	var tidbHashCols []tidbColMapping
+	for _, name := range pgColNames {
+		idx, ok := tidbColNameToIdx[strings.ToLower(name)]
+		if !ok {
+			continue
+		}
+		dt := strings.ToLower(tidbCols[idx].DatabaseTypeName())
+		if isApproximateFloatType(dt) || strings.Contains(dt, "json") {
+			continue
+		}
+		tidbHashCols = append(tidbHashCols, tidbColMapping{tidbIdx: idx, name: name})
+	}
+
+	tidbValues := make([]interface{}, len(tidbCols))
+	tidbPtrs := make([]interface{}, len(tidbCols))
+	for i := range tidbValues {
+		tidbPtrs[i] = &tidbValues[i]
+	}
+
+	var tidbHashes []string
+	for tidbRows.Next() {
+		if err := tidbRows.Scan(tidbPtrs...); err != nil {
+			continue
+		}
+		tidbRow := make([]string, len(tidbValues))
+		for i, val := range tidbValues {
+			tidbRow[i] = normalizeValue(val)
+		}
+		tidbHashes = append(tidbHashes, computeTiDBRowHash(tidbRow, tidbHashCols))
+	}
+	sort.Strings(tidbHashes)
+	tidbAggregate := fmt.Sprintf("%x", md5.Sum([]byte(strings.Join(tidbHashes, ","))))
+
+	if pgAggregate != tidbAggregate {
+		tr.Status = reporter.StatusFail
+		tr.Error = fmt.Sprintf("aggregate hash mismatch: pg=%s tidb=%s", truncate(pgAggregate, 16), truncate(tidbAggregate, 16))
+	} else {
+		tr.Status = reporter.StatusPass
+	}
+
+	tr.Suggestion = fmt.Sprintf("aggregate hash validation: pg_hash=%s tidb_hash=%s, %d PG rows vs %d TiDB rows",
+		truncate(pgAggregate, 16), truncate(tidbAggregate, 16), len(pgHashes), len(tidbHashes))
+
+	return tr
+}
+
+// validateBucketCompare divides table rows into N buckets based on row hash modulo,
+// compares row counts per bucket, and drills into mismatched buckets using hash_group.
+func (v *Validator) validateBucketCompare(ctx context.Context, pgDB, tidbDB *sql.DB, table string, tr reporter.TableReport, pgCols []*sql.ColumnType, pgData [][]string, skipCols map[int]bool) reporter.TableReport {
+	logger := zap.L()
+	bucketCount := v.cfg.Compare.NoPKBucketCount
+	if bucketCount <= 0 {
+		bucketCount = 100
+	}
+
+	logger.Info("using bucket validation for no-PK table",
+		zap.String("table", table),
+		zap.Int("bucket_count", bucketCount))
+
+	schema := v.cfg.Source.Schema
+	if schema == "" {
+		schema = "public"
+	}
+
+	// Build sorted column list
+	pgColNameToIdx := make(map[string]int)
+	var pgColNames []string
+	for i, c := range pgCols {
+		name := c.Name()
+		pgColNames = append(pgColNames, name)
+		pgColNameToIdx[strings.ToLower(name)] = i
+	}
+	sort.Strings(pgColNames)
+
+	var hashCols []colMapping
+	for _, name := range pgColNames {
+		idx := pgColNameToIdx[strings.ToLower(name)]
+		if skipCols[idx] {
+			continue
+		}
+		hashCols = append(hashCols, colMapping{pgIdx: idx, name: name})
+	}
+
+	// Assign PG rows to buckets
+	pgBuckets := make([][]string, bucketCount) // bucket -> list of row hashes
+	for _, row := range pgData {
+		h := computeRowHash(row, hashCols)
+		bucket := bucketOf(h, bucketCount)
+		pgBuckets[bucket] = append(pgBuckets[bucket], h)
+	}
+
+	// Query TiDB full table and assign to buckets
+	tidbQuery := fmt.Sprintf("SELECT * FROM %s", quoteMySQL(table))
+	tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
+	if err != nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = fmt.Sprintf("bucket compare: query TiDB: %v", err)
+		return tr
+	}
+	defer tidbRows.Close()
+
+	tidbCols, _ := tidbRows.ColumnTypes()
+	if tidbCols == nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = "bucket compare: failed to get TiDB column types"
+		return tr
+	}
+
+	tidbColNameToIdx := make(map[string]int)
+	for i, c := range tidbCols {
+		tidbColNameToIdx[strings.ToLower(c.Name())] = i
+	}
+
+	var tidbHashCols []tidbColMapping
+	for _, name := range pgColNames {
+		idx, ok := tidbColNameToIdx[strings.ToLower(name)]
+		if !ok {
+			continue
+		}
+		dt := strings.ToLower(tidbCols[idx].DatabaseTypeName())
+		if isApproximateFloatType(dt) || strings.Contains(dt, "json") {
+			continue
+		}
+		tidbHashCols = append(tidbHashCols, tidbColMapping{tidbIdx: idx, name: name})
+	}
+
+	tidbValues := make([]interface{}, len(tidbCols))
+	tidbPtrs := make([]interface{}, len(tidbCols))
+	for i := range tidbValues {
+		tidbPtrs[i] = &tidbValues[i]
+	}
+
+	tidbBuckets := make([][]string, bucketCount)
+	for tidbRows.Next() {
+		if err := tidbRows.Scan(tidbPtrs...); err != nil {
+			continue
+		}
+		tidbRow := make([]string, len(tidbValues))
+		for i, val := range tidbValues {
+			tidbRow[i] = normalizeValue(val)
+		}
+		h := computeTiDBRowHash(tidbRow, tidbHashCols)
+		bucket := bucketOf(h, bucketCount)
+		tidbBuckets[bucket] = append(tidbBuckets[bucket], h)
+	}
+
+	// Compare buckets: check row counts, drill into mismatched buckets
+	var mismatchDetails []string
+	mismatchedBuckets := 0
+
+	for i := 0; i < bucketCount; i++ {
+		pgCount := len(pgBuckets[i])
+		tidbCount := len(tidbBuckets[i])
+		if pgCount != tidbCount {
+			mismatchedBuckets++
+			if len(mismatchDetails) < 5 {
+				mismatchDetails = append(mismatchDetails,
+					fmt.Sprintf("bucket %d: PG=%d rows TiDB=%d rows", i, pgCount, tidbCount))
+			}
+			continue
+		}
+		// Same count — check if the hash multisets match
+		if pgCount > 0 {
+			pgMap := make(map[string]int)
+			for _, h := range pgBuckets[i] {
+				pgMap[h]++
+			}
+			for _, h := range tidbBuckets[i] {
+				pgMap[h]--
+			}
+			for h, diff := range pgMap {
+				if diff != 0 {
+					mismatchedBuckets++
+					if len(mismatchDetails) < 5 {
+						mismatchDetails = append(mismatchDetails,
+							fmt.Sprintf("bucket %d: hash %s count differs by %d", i, truncate(h, 16), diff))
+					}
+					break
+				}
+			}
+		}
+	}
+
+	if mismatchedBuckets > 0 {
+		tr.Status = reporter.StatusFail
+		if len(mismatchDetails) > 5 {
+			mismatchDetails = append(mismatchDetails[:5],
+				fmt.Sprintf("... and %d more mismatched buckets", mismatchedBuckets-5))
+		}
+		tr.Error = fmt.Sprintf("bucket mismatch (%d/%d buckets): %s",
+			mismatchedBuckets, bucketCount, strings.Join(mismatchDetails, "; "))
+	} else {
+		tr.Status = reporter.StatusPass
+	}
+
+	tr.Suggestion = fmt.Sprintf("bucket validation: %d buckets, %d mismatched, %d PG rows",
+		bucketCount, mismatchedBuckets, len(pgData))
+
+	return tr
+}
+
+// bucketOf maps a hex hash string to a bucket number [0, bucketCount).
+func bucketOf(hash string, bucketCount int) int {
+	// Use first 8 hex chars as a uint32, then mod bucketCount
+	var v uint32
+	for i := 0; i < 8 && i < len(hash); i++ {
+		v = v<<4 | hexVal(hash[i])
+	}
+	return int(v % uint32(bucketCount))
+}
+
+// hexVal converts a hex char to its value.
+func hexVal(c byte) uint32 {
+	switch {
+	case c >= '0' && c <= '9':
+		return uint32(c - '0')
+	case c >= 'a' && c <= 'f':
+		return uint32(c - 'a' + 10)
+	case c >= 'A' && c <= 'F':
+		return uint32(c - 'A' + 10)
+	default:
+		return 0
+	}
 }

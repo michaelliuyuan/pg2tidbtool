@@ -214,7 +214,13 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 		if strategy == "hash_group" {
 			return v.validateSamplingWithHashGroup(ctx, pgDB, tidbDB, table, ratio, tr, schema)
 		}
-		// Other strategies (aggregate, bucket) fall through to existing logic (Phase 2)
+		if strategy == "aggregate" {
+			return v.validateNoPKWithAggregate(ctx, pgDB, tidbDB, table, tr, schema)
+		}
+		if strategy == "bucket" {
+			return v.validateNoPKWithBucket(ctx, pgDB, tidbDB, table, tr, schema)
+		}
+		// Unknown strategy falls through to existing sampling logic
 	}
 
 	sampleSize := int(float64(tr.SourceRows) * ratio)
@@ -361,7 +367,7 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 			tidbKeyColIdx := -1
 			for i, c := range tidbCols {
 				dt := strings.ToLower(c.DatabaseTypeName())
-				if dt == "real" || dt == "float" || dt == "float4" || dt == "float8" || dt == "double" || dt == "double precision" || dt == "numeric" || dt == "decimal" || strings.Contains(dt, "json") {
+				if isApproximateFloatType(dt) || strings.Contains(dt, "json") {
 					tidbSkipCols[i] = true
 				}
 				if dt == "character" || dt == "char" || dt == "bpchar" || dt == "character varying" || dt == "varchar" || dt == "text" {
@@ -609,6 +615,104 @@ func (v *Validator) validateSamplingWithHashGroup(ctx context.Context, pgDB, tid
 		zap.Int("row_count", len(pgData)))
 
 	return v.validateHashGroup(ctx, pgDB, tidbDB, table, tr, pgCols, pgData, skipCols)
+}
+
+// validateNoPKWithAggregate wraps full-table PG query + aggregate hash validation.
+func (v *Validator) validateNoPKWithAggregate(ctx context.Context, pgDB, tidbDB *sql.DB, table string, tr reporter.TableReport, schema string) reporter.TableReport {
+	pgQuery := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
+	pgRows, err := pgDB.QueryContext(ctx, pgQuery)
+	if err != nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = fmt.Sprintf("aggregate hash: query PG: %v", err)
+		return tr
+	}
+	defer pgRows.Close()
+
+	pgCols, _ := pgRows.ColumnTypes()
+	if pgCols == nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = "aggregate hash: failed to get PG column types"
+		return tr
+	}
+
+	skipCols := make(map[int]bool)
+	for i, c := range pgCols {
+		dt := strings.ToLower(c.DatabaseTypeName())
+		if isApproximateFloatType(dt) || strings.Contains(dt, "json") {
+			skipCols[i] = true
+		}
+	}
+
+	pgValues := make([]interface{}, len(pgCols))
+	pgPtrs := make([]interface{}, len(pgCols))
+	for i := range pgValues {
+		pgPtrs[i] = &pgValues[i]
+	}
+
+	var pgData [][]string
+	for pgRows.Next() {
+		if err := pgRows.Scan(pgPtrs...); err != nil {
+			tr.Status = reporter.StatusFail
+			tr.Error = fmt.Sprintf("aggregate hash: scan PG row: %v", err)
+			return tr
+		}
+		row := make([]string, len(pgCols))
+		for i, val := range pgValues {
+			row[i] = normalizeValue(val)
+		}
+		pgData = append(pgData, row)
+	}
+
+	return v.validateAggregateHash(ctx, pgDB, tidbDB, table, tr, pgCols, pgData, skipCols)
+}
+
+// validateNoPKWithBucket wraps full-table PG query + bucket validation.
+func (v *Validator) validateNoPKWithBucket(ctx context.Context, pgDB, tidbDB *sql.DB, table string, tr reporter.TableReport, schema string) reporter.TableReport {
+	pgQuery := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
+	pgRows, err := pgDB.QueryContext(ctx, pgQuery)
+	if err != nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = fmt.Sprintf("bucket compare: query PG: %v", err)
+		return tr
+	}
+	defer pgRows.Close()
+
+	pgCols, _ := pgRows.ColumnTypes()
+	if pgCols == nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = "bucket compare: failed to get PG column types"
+		return tr
+	}
+
+	skipCols := make(map[int]bool)
+	for i, c := range pgCols {
+		dt := strings.ToLower(c.DatabaseTypeName())
+		if isApproximateFloatType(dt) || strings.Contains(dt, "json") {
+			skipCols[i] = true
+		}
+	}
+
+	pgValues := make([]interface{}, len(pgCols))
+	pgPtrs := make([]interface{}, len(pgCols))
+	for i := range pgValues {
+		pgPtrs[i] = &pgValues[i]
+	}
+
+	var pgData [][]string
+	for pgRows.Next() {
+		if err := pgRows.Scan(pgPtrs...); err != nil {
+			tr.Status = reporter.StatusFail
+			tr.Error = fmt.Sprintf("bucket compare: scan PG row: %v", err)
+			return tr
+		}
+		row := make([]string, len(pgCols))
+		for i, val := range pgValues {
+			row[i] = normalizeValue(val)
+		}
+		pgData = append(pgData, row)
+	}
+
+	return v.validateBucketCompare(ctx, pgDB, tidbDB, table, tr, pgCols, pgData, skipCols)
 }
 
 func (v *Validator) validateChecksum(ctx context.Context, pgDB, tidbDB *sql.DB, table string) reporter.TableReport {
