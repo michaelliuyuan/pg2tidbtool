@@ -49,6 +49,7 @@ type DataResult struct {
 
 type ValidateOpts struct {
 	Level       string
+	Mode        string // quick, sample, checksum, full
 	SampleRatio float64
 	Tables      []string
 	ReportFile  string

@@ -31,6 +31,9 @@ compare:
   no_pk_strategy: "auto"           # auto / hash_group / aggregate / bucket
   no_pk_bucket_count: 100          # for bucket strategy
   no_pk_table_threshold: 1000000   # rows above this use aggregate/bucket in auto mode
+  compare_mode: "sample"           # quick / sample / checksum / full
+  checksum_chunk_size: 50000       # rows per chunk in checksum mode
+  checksum_parallel: 4             # concurrent chunks in checksum mode
 
 logging:
   level: "info"

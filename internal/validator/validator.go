@@ -32,7 +32,16 @@ func NewValidator(cfg config.Config) *Validator {
 
 func (v *Validator) Run(ctx context.Context, opts common.ValidateOpts) (*reporter.Report, error) {
 	logger := zap.L()
-	logger.Info("starting data validation", zap.String("level", opts.Level))
+	logger.Info("starting data validation", zap.String("level", opts.Level), zap.String("mode", opts.Mode))
+
+	// Resolve effective mode: CLI flag > config default
+	mode := opts.Mode
+	if mode == "" {
+		mode = v.cfg.Compare.CompareMode
+	}
+	if mode == "" {
+		mode = "sample"
+	}
 
 	rpt := reporter.NewReport("data-validation")
 
@@ -713,6 +722,35 @@ func (v *Validator) validateNoPKWithBucket(ctx context.Context, pgDB, tidbDB *sq
 	}
 
 	return v.validateBucketCompare(ctx, pgDB, tidbDB, table, tr, pgCols, pgData, skipCols)
+}
+
+// validateFull runs all validation checks: row count + sampling + checksum.
+// Returns the first failure, or pass if all succeed.
+func (v *Validator) validateFull(ctx context.Context, pgDB, tidbDB *sql.DB, table string, sampleRatio float64) reporter.TableReport {
+	// Step 1: Row count check
+	tr := v.validateRowCount(ctx, pgDB, tidbDB, table)
+	if tr.Status == reporter.StatusFail {
+		return tr
+	}
+
+	// Step 2: Sampling check
+	tr = v.validateSampling(ctx, pgDB, tidbDB, table, sampleRatio)
+	if tr.Status == reporter.StatusFail {
+		return tr
+	}
+
+	// Step 3: Checksum (if table has PK, use chunked; otherwise hash_group covers it)
+	schema := v.cfg.Source.Schema
+	if schema == "" {
+		schema = "public"
+	}
+	keyInfo, _ := v.detectTableKey(ctx, pgDB, schema, table)
+	if keyInfo != nil && (keyInfo.HasPK || keyInfo.HasUniqueIndex) {
+		tr = v.validateChecksumChunked(ctx, pgDB, tidbDB, table)
+	}
+	// If no PK, sampling already used hash_group which is exact
+
+	return tr
 }
 
 func (v *Validator) validateChecksum(ctx context.Context, pgDB, tidbDB *sql.DB, table string) reporter.TableReport {

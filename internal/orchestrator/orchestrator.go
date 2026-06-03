@@ -220,10 +220,11 @@ func (o *Orchestrator) runValidate(ctx context.Context) PipelineResult {
 	start := time.Now()
 
 	rpt, err := o.validator.Run(ctx, common.ValidateOpts{
-		Level:      "L2",
+		Level:       "L2",
+		Mode:        o.cfg.Compare.CompareMode,
 		SampleRatio: 0.01,
-		Tables:     o.cfg.Migration.Tables,
-		ReportFile: "validation-report.json",
+		Tables:      o.cfg.Migration.Tables,
+		ReportFile:  "validation-report.json",
 	})
 
 	result := PipelineResult{

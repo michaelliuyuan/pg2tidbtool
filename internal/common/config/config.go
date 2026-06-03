@@ -35,6 +35,19 @@ type CompareConfig struct {
 	// NoPKTableThreshold is the row count above which "auto" mode will choose
 	// bucket or aggregate instead of hash_group.
 	NoPKTableThreshold int64 `yaml:"no_pk_table_threshold" json:"noPkTableThreshold"`
+
+	// CompareMode selects the default validation mode:
+	//   "quick"    — fast row count estimation only
+	//   "sample"   — row count + random sampling (default)
+	//   "checksum" — row count + chunked hash comparison
+	//   "full"     — all validations combined
+	CompareMode string `yaml:"compare_mode" json:"compareMode"`
+
+	// ChunkSize for checksum mode: number of rows per chunk.
+	ChecksumChunkSize int64 `yaml:"checksum_chunk_size" json:"checksumChunkSize"`
+
+	// ChecksumParallel for checksum mode: number of concurrent chunks.
+	ChecksumParallel int `yaml:"checksum_parallel" json:"checksumParallel"`
 }
 
 type SourceConfig struct {
