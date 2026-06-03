@@ -3,9 +3,11 @@ package validator
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -245,6 +247,14 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 
 	tidbQuery := fmt.Sprintf("SELECT * FROM %s ORDER BY 1 LIMIT %d OFFSET %d",
 		quoteMySQL(table), sampleSize, offset)
+	// Use binary collation on first column for string types to match PG's case-sensitive ordering
+	if len(pgCols) > 0 {
+		firstDT := strings.ToLower(pgCols[0].DatabaseTypeName())
+		if isStringColType(firstDT) {
+			tidbQuery = fmt.Sprintf("SELECT * FROM %s ORDER BY %s COLLATE utf8mb4_bin LIMIT %d OFFSET %d",
+				quoteMySQL(table), quoteMySQL(pgCols[0].Name()), sampleSize, offset)
+		}
+	}
 	tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
 	if err != nil {
 		tr.Status = reporter.StatusFail
@@ -438,13 +448,87 @@ func normalizeString(s string) string {
 }
 
 func normalizePGArray(s string) string {
-	// Replace PG array delimiters with JSON array format
-	s = strings.ReplaceAll(s, "{", "[")
-	s = strings.ReplaceAll(s, "}", "]")
-	// PG arrays use " to quote elements with special chars — these are already valid JSON string delimiters
-	// PG escapes embedded " as "" — convert to JSON \" for proper comparison
-	s = strings.ReplaceAll(s, `""`, `\"`)
-	return s
+	// Convert PG array format {elem1,elem2,...} to JSON array ["elem1","elem2",...]
+	// then normalize JSON whitespace for consistent comparison with TiDB JSON values.
+	return normalizeJSON(pgArrayToJSON(s))
+}
+
+func pgArrayToJSON(s string) string {
+	inner := s[1 : len(s)-1] // strip outer { }
+	if inner == "" {
+		return "[]"
+	}
+	elements := splitPGArrayElements(inner)
+	parts := make([]string, 0, len(elements))
+	for _, elem := range elements {
+		elem = strings.TrimSpace(elem)
+		if elem == "" || elem == "NULL" || elem == "null" {
+			parts = append(parts, "null")
+		} else if elem == "t" {
+			parts = append(parts, "true")
+		} else if elem == "f" {
+			parts = append(parts, "false")
+		} else if len(elem) >= 2 && elem[0] == '"' && elem[len(elem)-1] == '"' {
+			// Already quoted in PG syntax — unescape PG "" → JSON \"
+			unquoted := elem[1 : len(elem)-1]
+			unquoted = strings.ReplaceAll(unquoted, `""`, `"`)
+			b, _ := json.Marshal(unquoted)
+			parts = append(parts, string(b))
+		} else if len(elem) >= 2 && elem[0] == '{' && elem[len(elem)-1] == '}' {
+			parts = append(parts, pgArrayToJSON(elem))
+		} else {
+			// Try number; otherwise treat as string and JSON-quote it
+			if _, err := strconv.ParseFloat(elem, 64); err == nil {
+				parts = append(parts, elem)
+			} else {
+				b, _ := json.Marshal(elem)
+				parts = append(parts, string(b))
+			}
+		}
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+func splitPGArrayElements(s string) []string {
+	var elements []string
+	current := ""
+	inQuote := false
+	escape := false
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if escape {
+			current += string(ch)
+			escape = false
+			continue
+		}
+		if ch == '\\' {
+			escape = true
+			current += string(ch)
+			continue
+		}
+		if ch == '"' {
+			inQuote = !inQuote
+			current += string(ch)
+			continue
+		}
+		if ch == '{' && !inQuote {
+			depth++
+			current += string(ch)
+		} else if ch == '}' && !inQuote {
+			depth--
+			current += string(ch)
+		} else if ch == ',' && !inQuote && depth == 0 {
+			elements = append(elements, current)
+			current = ""
+		} else {
+			current += string(ch)
+		}
+	}
+	if current != "" || len(elements) > 0 {
+		elements = append(elements, current)
+	}
+	return elements
 }
 
 func normalizeJSON(s string) string {
@@ -485,4 +569,12 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+func isStringColType(dt string) bool {
+	switch dt {
+	case "character", "char", "bpchar", "character varying", "varchar", "text", "uuid":
+		return true
+	}
+	return false
 }
