@@ -21,3 +21,26 @@ func TestQuoteMySQL(t *testing.T) {
 		t.Error("should escape backticks")
 	}
 }
+
+func TestNormalizeDecimalString(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"10.50", "10.5"},
+		{"10.00", "10"},
+		{"10.5", "10.5"},
+		{"10", "10"},          // no decimal point, unchanged
+		{"-3.1400", "-3.14"},
+		{"0.00", "0"},
+		{"hello", "hello"},   // not a decimal, unchanged
+		{"1.0e5", "1.0e5"},   // scientific notation, not matched by decimalRe
+		{"100", "100"},        // integer, unchanged
+	}
+	for _, tt := range tests {
+		result := normalizeDecimalString(tt.input)
+		if result != tt.expected {
+			t.Errorf("normalizeDecimalString(%q) = %q, want %q", tt.input, result, tt.expected)
+		}
+	}
+}

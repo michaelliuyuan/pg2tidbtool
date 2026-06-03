@@ -821,7 +821,27 @@ func normalizeValue(val interface{}) string {
 var uuidRe = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
 var pgArrayRe = regexp.MustCompile(`^\{.*\}$`)
 
+// decimalRe matches numeric strings like "10.50", "-3.1400", "0.00"
+var decimalRe = regexp.MustCompile(`^-?[0-9]+[.][0-9]+$`)
+
+// normalizeDecimalString strips trailing zeros from decimal-looking strings.
+// "10.50" -> "10.5", "10.00" -> "10", "10" -> "10" (unchanged, no decimal point).
+func normalizeDecimalString(s string) string {
+	if !decimalRe.MatchString(s) {
+		return s
+	}
+	// Strip trailing zeros
+	s = strings.TrimRight(s, "0")
+	// Strip trailing decimal point if no fractional digits remain
+	s = strings.TrimRight(s, ".")
+	return s
+}
+
 func normalizeString(s string) string {
+	// Normalize decimal numbers: strip trailing zeros so "10.50" and "10.5"
+	// compare equal. This handles PG (string "10.50") vs TiDB (float64->"10.5").
+	s = normalizeDecimalString(s)
+
 	// Normalize UUID to lowercase
 	s = uuidRe.ReplaceAllStringFunc(s, func(m string) string {
 		return strings.ToLower(m)
