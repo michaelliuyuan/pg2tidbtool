@@ -43,6 +43,9 @@ type CompareConfig struct {
 	//   "full"     — all validations combined
 	CompareMode string `yaml:"compare_mode" json:"compareMode"`
 
+	// SampleRatio for sample mode: fraction of rows to sample (0.0-1.0).
+	SampleRatio float64 `yaml:"sample_ratio" json:"sampleRatio"`
+
 	// ChunkSize for checksum mode: number of rows per chunk.
 	ChecksumChunkSize int64 `yaml:"checksum_chunk_size" json:"checksumChunkSize"`
 
@@ -161,9 +164,13 @@ func DefaultConfig() *Config {
 			ChunkParallel:       4,
 			},
 		Compare: CompareConfig{
+			CompareMode:        "sample",
+			SampleRatio:        0.01,
 			NoPKStrategy:       "auto",
 			NoPKBucketCount:    100,
 			NoPKTableThreshold: 1000000,
+			ChecksumChunkSize:  50000,
+			ChecksumParallel:   4,
 		},
 		Logging: LoggingConfig{
 			Level:  "info",

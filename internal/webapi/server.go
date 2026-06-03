@@ -440,6 +440,12 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 			SkipValidate:        req.Opts.SkipValidate,
 		},
 		Logging: config.LoggingConfig{Level: "info", Format: "console"},
+		Compare: config.CompareConfig{
+			CompareMode:       req.Opts.CompareMode,
+			SampleRatio:       req.Opts.SampleRatio,
+			ChecksumChunkSize: req.Opts.ChecksumChunkSize,
+			ChecksumParallel:  req.Opts.ChecksumParallel,
+		},
 	}
 	if cfg.Migration.Parallel <= 0 {
 		cfg.Migration.Parallel = 4

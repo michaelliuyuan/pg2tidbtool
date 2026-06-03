@@ -84,18 +84,20 @@ func (v *Validator) Run(ctx context.Context, opts common.ValidateOpts) (*reporte
 			defer func() { <-sem }()
 
 			var tr reporter.TableReport
-			switch opts.Level {
-			case "L1":
+			switch mode {
+			case "quick":
 				tr = v.validateRowCount(ctx, pgDB, tidbDB, tableName)
-			case "L2":
+			case "sample":
 				tr = v.validateSampling(ctx, pgDB, tidbDB, tableName, opts.SampleRatio)
-			case "L3":
+			case "checksum":
 				tr = v.validateChecksum(ctx, pgDB, tidbDB, tableName)
+			case "full":
+				tr = v.validateFull(ctx, pgDB, tidbDB, tableName, opts.SampleRatio)
 			default:
 				tr = reporter.TableReport{
 					TableName: tableName,
 					Status:    reporter.StatusFail,
-					Error:     fmt.Sprintf("unknown validation level: %s", opts.Level),
+					Error:     fmt.Sprintf("unknown validation mode: %s", mode),
 				}
 			}
 
