@@ -267,14 +267,17 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 		}
 	}
 
-	// Build lookup map from PG data by key column value
-	pgMap := make(map[string][]string)
+	// Build multi-value lookup map from PG data by key column value.
+	// Multiple PG rows can share the same key (e.g., composite PK tables),
+	// so we store a slice of rows per key and match-and-remove during comparison.
+	pgMap := make(map[string][][]string)
 	for _, row := range pgData {
 		if len(row) == 0 {
 			continue
 		}
 		if keyColIdx >= 0 && keyColIdx < len(row) {
-			pgMap[row[keyColIdx]] = row
+			key := row[keyColIdx]
+			pgMap[key] = append(pgMap[key], row)
 		}
 	}
 
@@ -329,66 +332,96 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 			}
 
 			// Track which PG keys were found in TiDB
-			foundInTiDB := make(map[string]bool)
 
-			for tidbRows.Next() {
-				if err := tidbRows.Scan(tidbPtrs...); err != nil {
-					tr.Status = reporter.StatusFail
-					tr.Error = fmt.Sprintf("scan TiDB row: %v", err)
-					return tr
-				}
 
-				// Normalize all TiDB values
-				tidbRow := make([]string, len(tidbValues))
-				for i, val := range tidbValues {
-					tidbRow[i] = normalizeValue(val)
-				}
-				if len(tidbRow) == 0 {
-					continue
-				}
+				for tidbRows.Next() {
+					if err := tidbRows.Scan(tidbPtrs...); err != nil {
+						tr.Status = reporter.StatusFail
+						tr.Error = fmt.Sprintf("scan TiDB row: %v", err)
+						return tr
+					}
 
-				key := tidbRow[keyColIdx]
-				foundInTiDB[key] = true
-
-				pgRow, found := pgMap[key]
-				if !found {
-					// TiDB has a row not in PG sample (shouldn't happen with WHERE IN)
-					mismatchCount++
-					mismatchDetails = append(mismatchDetails, fmt.Sprintf("key %q in TiDB but not in PG sample", truncate(key, 40)))
-					continue
-				}
-
-				// Compare column by column
-				for colIdx, tidbVal := range tidbRow {
-					if tidbSkipCols[colIdx] {
+					// Normalize all TiDB values
+					tidbRow := make([]string, len(tidbValues))
+					for i, val := range tidbValues {
+						tidbRow[i] = normalizeValue(val)
+					}
+					if len(tidbRow) == 0 {
 						continue
 					}
-					pgVal := ""
-					if colIdx < len(pgRow) {
-						pgVal = pgRow[colIdx]
-					}
-					if tidbTrimCols[colIdx] {
-						pgVal = strings.TrimRight(pgVal, " ")
-						tidbVal = strings.TrimRight(tidbVal, " ")
-					}
-					if pgVal != tidbVal {
-						mismatchCount++
-						colName := tidbCols[colIdx].Name()
-						mismatchDetails = append(mismatchDetails, fmt.Sprintf("key=%s col %q: PG=%q TiDB=%q", truncate(key, 20), colName, truncate(pgVal, 80), truncate(tidbVal, 80)))
-						break
-					}
-				}
-			}
 
-			// Check for PG keys not found in TiDB
-			for _, row := range pgData {
-				if len(row) > 0 && row[0] != "\\N" {
-					if !foundInTiDB[row[keyColIdx]] {
+					key := tidbRow[keyColIdx]
+					pgCandidates, found := pgMap[key]
+					if !found || len(pgCandidates) == 0 {
+						// TiDB has a row not in PG sample
 						mismatchCount++
-						mismatchDetails = append(mismatchDetails, fmt.Sprintf("key %q in PG but not found in TiDB", truncate(row[keyColIdx], 40)))
+						mismatchDetails = append(mismatchDetails, fmt.Sprintf("key %q in TiDB but not in PG sample", truncate(key, 40)))
+						continue
+					}
+
+					// Find a fully matching PG row among candidates (handles duplicate keys / composite PK)
+					matched := false
+					for ci, pgRow := range pgCandidates {
+						rowMatch := true
+						for colIdx, tidbVal := range tidbRow {
+							if tidbSkipCols[colIdx] {
+								continue
+							}
+							pgVal := ""
+							if colIdx < len(pgRow) {
+								pgVal = pgRow[colIdx]
+							}
+							if tidbTrimCols[colIdx] {
+								pgVal = strings.TrimRight(pgVal, " ")
+								tidbVal = strings.TrimRight(tidbVal, " ")
+							}
+							if pgVal != tidbVal {
+								rowMatch = false
+								break
+							}
+						}
+						if rowMatch {
+							// Remove matched row from candidate pool
+							pgMap[key] = append(pgCandidates[:ci], pgCandidates[ci+1:]...)
+							matched = true
+							break
+						}
+					}
+					if !matched {
+						// No PG row matches all columns — genuine data difference
+						mismatchCount++
+						pgRow := pgCandidates[0]
+						for colIdx, tidbVal := range tidbRow {
+							if tidbSkipCols[colIdx] {
+								continue
+							}
+							pgVal := ""
+							if colIdx < len(pgRow) {
+								pgVal = pgRow[colIdx]
+							}
+							if tidbTrimCols[colIdx] {
+								pgVal = strings.TrimRight(pgVal, " ")
+								tidbVal = strings.TrimRight(tidbVal, " ")
+							}
+							if pgVal != tidbVal {
+								colName := tidbCols[colIdx].Name()
+								mismatchDetails = append(mismatchDetails, fmt.Sprintf("key=%s col %q: PG=%q TiDB=%q", truncate(key, 20), colName, truncate(pgVal, 80), truncate(tidbVal, 80)))
+								break
+							}
+						}
 					}
 				}
-			}
+
+				// Check for PG rows not matched in TiDB (remaining in pgMap)
+				for _, row := range pgData {
+					if keyColIdx < len(row) && row[keyColIdx] != "\\N" {
+						if candidates, ok := pgMap[row[keyColIdx]]; ok && len(candidates) > 0 {
+							mismatchCount++
+							mismatchDetails = append(mismatchDetails, fmt.Sprintf("key %q in PG but not found in TiDB", truncate(row[keyColIdx], 40)))
+						}
+					}
+				}
+
 		}
 	} else {
 		// Fallback for NULL first column: use positional comparison
