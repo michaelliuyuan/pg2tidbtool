@@ -247,14 +247,6 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 
 	tidbQuery := fmt.Sprintf("SELECT * FROM %s ORDER BY 1 LIMIT %d OFFSET %d",
 		quoteMySQL(table), sampleSize, offset)
-	// Use binary collation on first column for string types to match PG's case-sensitive ordering
-	if len(pgCols) > 0 {
-		firstDT := strings.ToLower(pgCols[0].DatabaseTypeName())
-		if isStringColType(firstDT) {
-			tidbQuery = fmt.Sprintf("SELECT * FROM %s ORDER BY %s COLLATE utf8mb4_bin LIMIT %d OFFSET %d",
-				quoteMySQL(table), quoteMySQL(pgCols[0].Name()), sampleSize, offset)
-		}
-	}
 	tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
 	if err != nil {
 		tr.Status = reporter.StatusFail
@@ -275,9 +267,17 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 		tidbPtrs[i] = &tidbValues[i]
 	}
 
+	// Build lookup map from PG data by first column value for key-based comparison.
+	// This avoids false positives from collation/ordering differences between PG and TiDB.
+	pgMap := make(map[string]int)
+	for i, row := range pgData {
+		if len(row) > 0 {
+			pgMap[row[0]] = i
+		}
+	}
+
 	var mismatchCount int
 	var mismatchDetails []string
-	rowIdx := 0
 	for tidbRows.Next() {
 		if err := tidbRows.Scan(tidbPtrs...); err != nil {
 			tr.Status = reporter.StatusFail
@@ -285,29 +285,45 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 			return tr
 		}
 
-		if rowIdx < len(pgData) {
-			for colIdx, val := range tidbValues {
-				if skipCols[colIdx] {
-					continue
-				}
-				pgVal := ""
-				if colIdx < len(pgData[rowIdx]) {
-					pgVal = pgData[rowIdx][colIdx]
-				}
-				tidbVal := normalizeValue(val)
-				if trimCols[colIdx] {
-					pgVal = strings.TrimRight(pgVal, " ")
-					tidbVal = strings.TrimRight(tidbVal, " ")
-				}
-				if pgVal != tidbVal {
-					mismatchCount++
-					colName := tidbCols[colIdx].Name()
-					mismatchDetails = append(mismatchDetails, fmt.Sprintf("row %d col %q: PG=%q TiDB=%q", rowIdx+int(offset)+1, colName, truncate(pgVal, 80), truncate(tidbVal, 80)))
-					break
-				}
+		// Normalize all TiDB values
+		tidbRow := make([]string, len(tidbValues))
+		for i, val := range tidbValues {
+			tidbRow[i] = normalizeValue(val)
+		}
+
+		if len(tidbRow) == 0 {
+			continue
+		}
+
+		// Look up matching PG row by first column value (key-based)
+		key := tidbRow[0]
+		pgIdx, found := pgMap[key]
+		if !found {
+			mismatchCount++
+			mismatchDetails = append(mismatchDetails, fmt.Sprintf("key %q not found in PG sample", truncate(key, 40)))
+			continue
+		}
+
+		pgRow := pgData[pgIdx]
+		for colIdx, tidbVal := range tidbRow {
+			if skipCols[colIdx] {
+				continue
+			}
+			pgVal := ""
+			if colIdx < len(pgRow) {
+				pgVal = pgRow[colIdx]
+			}
+			if trimCols[colIdx] {
+				pgVal = strings.TrimRight(pgVal, " ")
+				tidbVal = strings.TrimRight(tidbVal, " ")
+			}
+			if pgVal != tidbVal {
+				mismatchCount++
+				colName := tidbCols[colIdx].Name()
+				mismatchDetails = append(mismatchDetails, fmt.Sprintf("key=%s col %q: PG=%q TiDB=%q", truncate(key, 20), colName, truncate(pgVal, 80), truncate(tidbVal, 80)))
+				break
 			}
 		}
-		rowIdx++
 	}
 
 	if mismatchCount > 0 {
@@ -569,12 +585,4 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
-}
-
-func isStringColType(dt string) bool {
-	switch dt {
-	case "character", "char", "bpchar", "character varying", "varchar", "text", "uuid":
-		return true
-	}
-	return false
 }
