@@ -319,8 +319,11 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 			}
 
 			// Build skip/trim column maps for TiDB column types
+			// Also build column name mapping: TiDB col index -> PG col index (handles column order differences)
 			tidbSkipCols := make(map[int]bool)
 			tidbTrimCols := make(map[int]bool)
+			tidbToPG := make(map[int]int)
+			tidbKeyColIdx := -1
 			for i, c := range tidbCols {
 				dt := strings.ToLower(c.DatabaseTypeName())
 				if dt == "real" || dt == "float" || dt == "float4" || dt == "float8" || dt == "double" || dt == "double precision" || dt == "numeric" || dt == "decimal" || strings.Contains(dt, "json") {
@@ -329,6 +332,19 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 				if dt == "character" || dt == "char" || dt == "bpchar" || dt == "character varying" || dt == "varchar" || dt == "text" {
 					tidbTrimCols[i] = true
 				}
+				colName := strings.ToLower(c.Name())
+				if colName == strings.ToLower(keyColName) {
+					tidbKeyColIdx = i
+				}
+				for pi, pc := range pgCols {
+					if strings.ToLower(pc.Name()) == colName {
+						tidbToPG[i] = pi
+						break
+					}
+				}
+			}
+			if tidbKeyColIdx < 0 {
+				tidbKeyColIdx = keyColIdx
 			}
 
 			// Track which PG keys were found in TiDB
@@ -350,7 +366,7 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 						continue
 					}
 
-					key := tidbRow[keyColIdx]
+					key := tidbRow[tidbKeyColIdx]
 					pgCandidates, found := pgMap[key]
 					if !found || len(pgCandidates) == 0 {
 						// TiDB has a row not in PG sample
@@ -363,15 +379,19 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 					matched := false
 					for ci, pgRow := range pgCandidates {
 						rowMatch := true
-						for colIdx, tidbVal := range tidbRow {
-							if tidbSkipCols[colIdx] {
+						for tidbColIdx, tidbVal := range tidbRow {
+							if tidbSkipCols[tidbColIdx] {
+								continue
+							}
+							pgColIdx, mapped := tidbToPG[tidbColIdx]
+							if !mapped {
 								continue
 							}
 							pgVal := ""
-							if colIdx < len(pgRow) {
-								pgVal = pgRow[colIdx]
+							if pgColIdx < len(pgRow) {
+								pgVal = pgRow[pgColIdx]
 							}
-							if tidbTrimCols[colIdx] {
+							if tidbTrimCols[tidbColIdx] {
 								pgVal = strings.TrimRight(pgVal, " ")
 								tidbVal = strings.TrimRight(tidbVal, " ")
 							}
@@ -391,20 +411,24 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 						// No PG row matches all columns — genuine data difference
 						mismatchCount++
 						pgRow := pgCandidates[0]
-						for colIdx, tidbVal := range tidbRow {
-							if tidbSkipCols[colIdx] {
+						for tidbColIdx, tidbVal := range tidbRow {
+							if tidbSkipCols[tidbColIdx] {
+								continue
+							}
+							pgColIdx, mapped := tidbToPG[tidbColIdx]
+							if !mapped {
 								continue
 							}
 							pgVal := ""
-							if colIdx < len(pgRow) {
-								pgVal = pgRow[colIdx]
+							if pgColIdx < len(pgRow) {
+								pgVal = pgRow[pgColIdx]
 							}
-							if tidbTrimCols[colIdx] {
+							if tidbTrimCols[tidbColIdx] {
 								pgVal = strings.TrimRight(pgVal, " ")
 								tidbVal = strings.TrimRight(tidbVal, " ")
 							}
 							if pgVal != tidbVal {
-								colName := tidbCols[colIdx].Name()
+								colName := tidbCols[tidbColIdx].Name()
 								mismatchDetails = append(mismatchDetails, fmt.Sprintf("key=%s col %q: PG=%q TiDB=%q", truncate(key, 20), colName, truncate(pgVal, 80), truncate(tidbVal, 80)))
 								break
 							}
