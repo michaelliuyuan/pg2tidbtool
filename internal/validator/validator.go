@@ -57,11 +57,6 @@ func (v *Validator) Run(ctx context.Context, opts common.ValidateOpts) (*reporte
 	}
 	defer tidbDB.Close()
 
-	// Set TiDB session timezone to UTC so TIMESTAMP values are returned in UTC,
-	// matching PG's timestamptz behavior. Without this, TiDB converts TIMESTAMP
-	// to the server's local timezone (e.g., UTC+8) before sending to the client.
-	_, _ = tidbDB.ExecContext(ctx, "SET time_zone = '+00:00'")
-
 	pgDB.SetMaxOpenConns(8)
 	pgDB.SetConnMaxLifetime(5 * time.Minute)
 	tidbDB.SetMaxOpenConns(8)
