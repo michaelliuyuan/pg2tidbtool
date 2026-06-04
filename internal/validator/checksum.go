@@ -18,8 +18,17 @@ import (
 func (v *Validator) validateChecksumChunked(ctx context.Context, pgDB, tidbDB *sql.DB, table string) reporter.TableReport {
 	tr := reporter.TableReport{TableName: table, Status: reporter.StatusPass}
 
+	// Get a dedicated TiDB connection with UTC timezone for row count.
+	tidbConn, connErr := getTiDBConn(ctx, tidbDB)
+	if connErr != nil {
+		tr.Status = reporter.StatusFail
+		tr.Error = fmt.Sprintf("checksum: get TiDB connection: %v", connErr)
+		return tr
+	}
+	defer tidbConn.Close()
+
 	// First do exact row count
-	tr = v.validateRowCount(ctx, pgDB, tidbDB, table)
+	tr = v.validateRowCount(ctx, pgDB, tidbConn, table)
 	if tr.Status == reporter.StatusFail && tr.DiffRows != 0 {
 		return tr
 	}
@@ -45,7 +54,7 @@ func (v *Validator) validateChecksumChunked(ctx context.Context, pgDB, tidbDB *s
 		// No key — fall back to hash_group comparison (already implemented)
 		logger := zap.L()
 		logger.Info("checksum mode: no PK/unique for chunking, falling back to hash_group", zap.String("table", table))
-		return v.validateSamplingWithHashGroup(ctx, pgDB, tidbDB, table, 1.0, tr, schema)
+		return v.validateSamplingWithHashGroup(ctx, pgDB, tidbConn, table, 1.0, tr, schema)
 	}
 
 	chunkSize := v.cfg.Compare.ChecksumChunkSize
@@ -217,11 +226,19 @@ func (v *Validator) computeChunkHashPG(ctx context.Context, pgDB *sql.DB, schema
 }
 
 // computeChunkHashTiDB computes an aggregate hash for a chunk of TiDB rows.
+// It gets its own dedicated connection with UTC timezone for parallel goroutines.
 func (v *Validator) computeChunkHashTiDB(ctx context.Context, tidbDB *sql.DB, table, orderBy string, ch chunkRange) (string, error) {
 	query := fmt.Sprintf("SELECT * FROM %s ORDER BY %s LIMIT %d OFFSET %d",
 		quoteMySQL(table), quoteMySQL(orderBy), ch.limit, ch.offset)
 
-	rows, err := tidbDB.QueryContext(ctx, query)
+	// Get dedicated connection with UTC timezone for this goroutine.
+	conn, err := getTiDBConn(ctx, tidbDB)
+	if err != nil {
+		return "", fmt.Errorf("get TiDB conn for chunk: %w", err)
+	}
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(ctx, query)
 	if err != nil {
 		return "", err
 	}

@@ -12,7 +12,7 @@ import (
 
 // validateQuick performs fast row count estimation using pg_stat_user_tables
 // for PG and SHOW TABLE STATUS for TiDB, avoiding full table scans.
-func (v *Validator) validateQuick(ctx context.Context, pgDB, tidbDB *sql.DB, table string) reporter.TableReport {
+func (v *Validator) validateQuick(ctx context.Context, pgDB *sql.DB, tidbConn *sql.Conn, table string) reporter.TableReport {
 	tr := reporter.TableReport{TableName: table, Status: reporter.StatusPass}
 	logger := zap.L()
 
@@ -45,7 +45,7 @@ func (v *Validator) validateQuick(ctx context.Context, pgDB, tidbDB *sql.DB, tab
 	var tidbCount sql.NullInt64
 	var tidbName, tidbEngine, tidbVersion sql.NullString
 	var tidbRowFormat, tidbRows, tidbAvgRowLen, tidbDataLen, tidbMaxDataLen, tidbIndexLen, tidbAutoInc, tidbCreateTime, tidbUpdateTime, tidbCheckTime, tidbCollation, tidbChecksum, tidbCreateOpts, tidbComment sql.NullString
-	err = tidbDB.QueryRowContext(ctx,
+	err = tidbConn.QueryRowContext(ctx,
 		fmt.Sprintf("SHOW TABLE STATUS LIKE '%s'", escapeSQLLike(table))).Scan(
 		&tidbName, &tidbEngine, &tidbVersion, &tidbRowFormat, &tidbRows,
 		&tidbAvgRowLen, &tidbDataLen, &tidbMaxDataLen, &tidbIndexLen,
@@ -55,7 +55,7 @@ func (v *Validator) validateQuick(ctx context.Context, pgDB, tidbDB *sql.DB, tab
 		logger.Warn("quick mode: SHOW TABLE STATUS failed, falling back to COUNT(*)",
 			zap.String("table", table), zap.Error(err))
 		// Fallback to exact COUNT(*)
-		err = tidbDB.QueryRowContext(ctx,
+		err = tidbConn.QueryRowContext(ctx,
 			fmt.Sprintf("SELECT COUNT(*) FROM %s", quoteMySQL(table))).Scan(&tidbCount)
 		if err != nil {
 			tr.Status = reporter.StatusFail

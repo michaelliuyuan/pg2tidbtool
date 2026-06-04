@@ -30,6 +30,22 @@ func NewValidator(cfg config.Config) *Validator {
 	return &Validator{cfg: cfg}
 }
 
+// getTiDBConn gets a dedicated connection from the TiDB connection pool and
+// sets the session timezone to UTC. This ensures TIMESTAMP values are returned
+// in UTC, matching PostgreSQL's timestamptz output.
+func getTiDBConn(ctx context.Context, tidbDB *sql.DB) (*sql.Conn, error) {
+	conn, err := tidbDB.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get TiDB connection: %w", err)
+	}
+	_, err = conn.ExecContext(ctx, "SET time_zone = '+00:00'")
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("set TiDB timezone: %w", err)
+	}
+	return conn, nil
+}
+
 func (v *Validator) Run(ctx context.Context, opts common.ValidateOpts) (*reporter.Report, error) {
 	logger := zap.L()
 	logger.Info("starting data validation", zap.String("level", opts.Level), zap.String("mode", opts.Mode))
@@ -83,16 +99,32 @@ func (v *Validator) Run(ctx context.Context, opts common.ValidateOpts) (*reporte
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			// Get a dedicated TiDB connection with UTC timezone for this goroutine.
+			// This ensures all queries on this connection return TIMESTAMP values
+			// in UTC, matching PostgreSQL's timestamptz output.
+			tidbConn, connErr := getTiDBConn(ctx, tidbDB)
+			if connErr != nil {
+				mu.Lock()
+				rpt.AddTableReport(reporter.TableReport{
+					TableName: tableName,
+					Status:    reporter.StatusFail,
+					Error:     fmt.Sprintf("get TiDB connection: %v", connErr),
+				})
+				mu.Unlock()
+				return
+			}
+			defer tidbConn.Close()
+
 			var tr reporter.TableReport
 			switch mode {
 			case "quick":
-				tr = v.validateRowCount(ctx, pgDB, tidbDB, tableName)
+				tr = v.validateRowCount(ctx, pgDB, tidbConn, tableName)
 			case "sample":
-				tr = v.validateSampling(ctx, pgDB, tidbDB, tableName, opts.SampleRatio)
+				tr = v.validateSampling(ctx, pgDB, tidbConn, tidbDB, tableName, opts.SampleRatio)
 			case "checksum":
-				tr = v.validateChecksum(ctx, pgDB, tidbDB, tableName)
+				tr = v.validateChecksum(ctx, pgDB, tidbConn, tableName)
 			case "full":
-				tr = v.validateFull(ctx, pgDB, tidbDB, tableName, opts.SampleRatio)
+				tr = v.validateFull(ctx, pgDB, tidbConn, tidbDB, tableName, opts.SampleRatio)
 			default:
 				tr = reporter.TableReport{
 					TableName: tableName,
@@ -139,7 +171,7 @@ func (v *Validator) Run(ctx context.Context, opts common.ValidateOpts) (*reporte
 	return rpt, nil
 }
 
-func (v *Validator) validateRowCount(ctx context.Context, pgDB, tidbDB *sql.DB, table string) reporter.TableReport {
+func (v *Validator) validateRowCount(ctx context.Context, pgDB *sql.DB, tidbConn *sql.Conn, table string) reporter.TableReport {
 	tr := reporter.TableReport{TableName: table, Status: reporter.StatusPass}
 
 	schema := v.cfg.Source.Schema
@@ -157,7 +189,7 @@ func (v *Validator) validateRowCount(ctx context.Context, pgDB, tidbDB *sql.DB, 
 	}
 
 	var targetCount int64
-	err = tidbDB.QueryRowContext(ctx,
+	err = tidbConn.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT COUNT(*) FROM %s", quoteMySQL(table))).Scan(&targetCount)
 	if err != nil {
 		tr.Status = reporter.StatusFail
@@ -177,8 +209,8 @@ func (v *Validator) validateRowCount(ctx context.Context, pgDB, tidbDB *sql.DB, 
 	return tr
 }
 
-func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, table string, ratio float64) reporter.TableReport {
-	tr := v.validateRowCount(ctx, pgDB, tidbDB, table)
+func (v *Validator) validateSampling(ctx context.Context, pgDB *sql.DB, tidbConn *sql.Conn, tidbDB *sql.DB, table string, ratio float64) reporter.TableReport {
+	tr := v.validateRowCount(ctx, pgDB, tidbConn, table)
 	if tr.Status == reporter.StatusFail && tr.DiffRows != 0 {
 		return tr
 	}
@@ -223,13 +255,13 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 		}
 
 		if strategy == "hash_group" {
-			return v.validateSamplingWithHashGroup(ctx, pgDB, tidbDB, table, ratio, tr, schema)
+			return v.validateSamplingWithHashGroup(ctx, pgDB, tidbConn, table, ratio, tr, schema)
 		}
 		if strategy == "aggregate" {
-			return v.validateNoPKWithAggregate(ctx, pgDB, tidbDB, table, tr, schema)
+			return v.validateNoPKWithAggregate(ctx, pgDB, tidbConn, table, tr, schema)
 		}
 		if strategy == "bucket" {
-			return v.validateNoPKWithBucket(ctx, pgDB, tidbDB, table, tr, schema)
+			return v.validateNoPKWithBucket(ctx, pgDB, tidbConn, table, tr, schema)
 		}
 		// Unknown strategy falls through to existing sampling logic
 	}
@@ -416,7 +448,7 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 				quoteMySQL(table), quoteMySQL(keyColName), strings.Join(whereParts, ","))
 		}
 
-		tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
+		tidbRows, err := tidbConn.QueryContext(ctx, tidbQuery)
 		if err != nil {
 			tr.Status = reporter.StatusFail
 			tr.Error = fmt.Sprintf("sample target: %v", err)
@@ -575,7 +607,7 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 		// (less reliable but necessary when key column is NULL)
 		tidbQuery := fmt.Sprintf("SELECT * FROM %s LIMIT %d OFFSET %d",
 			quoteMySQL(table), sampleSize, offset)
-		tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
+		tidbRows, err := tidbConn.QueryContext(ctx, tidbQuery)
 		if err != nil {
 			tr.Status = reporter.StatusFail
 			tr.Error = fmt.Sprintf("sample target: %v", err)
@@ -640,7 +672,7 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB, tidbDB *sql.DB, 
 // comparison. It queries ALL rows from PG (hash_group is an exact strategy,
 // not a sampled one), then uses validateHashGroup to compare the multiset of
 // row hashes against TiDB's full table.
-func (v *Validator) validateSamplingWithHashGroup(ctx context.Context, pgDB, tidbDB *sql.DB, table string, ratio float64, tr reporter.TableReport, schema string) reporter.TableReport {
+func (v *Validator) validateSamplingWithHashGroup(ctx context.Context, pgDB *sql.DB, tidbConn *sql.Conn, table string, ratio float64, tr reporter.TableReport, schema string) reporter.TableReport {
 	logger := zap.L()
 
 	// Hash group is an exact strategy — query the full PG table, not a sample.
@@ -696,11 +728,11 @@ func (v *Validator) validateSamplingWithHashGroup(ctx context.Context, pgDB, tid
 		zap.String("table", table),
 		zap.Int("row_count", len(pgData)))
 
-	return v.validateHashGroup(ctx, pgDB, tidbDB, table, tr, pgCols, pgData, skipCols)
+	return v.validateHashGroup(ctx, pgDB, tidbConn, table, tr, pgCols, pgData, skipCols)
 }
 
 // validateNoPKWithAggregate wraps full-table PG query + aggregate hash validation.
-func (v *Validator) validateNoPKWithAggregate(ctx context.Context, pgDB, tidbDB *sql.DB, table string, tr reporter.TableReport, schema string) reporter.TableReport {
+func (v *Validator) validateNoPKWithAggregate(ctx context.Context, pgDB *sql.DB, tidbConn *sql.Conn, table string, tr reporter.TableReport, schema string) reporter.TableReport {
 	pgQuery := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
 	pgRows, err := pgDB.QueryContext(ctx, pgQuery)
 	if err != nil {
@@ -745,11 +777,11 @@ func (v *Validator) validateNoPKWithAggregate(ctx context.Context, pgDB, tidbDB 
 		pgData = append(pgData, row)
 	}
 
-	return v.validateAggregateHash(ctx, pgDB, tidbDB, table, tr, pgCols, pgData, skipCols)
+	return v.validateAggregateHash(ctx, pgDB, tidbConn, table, tr, pgCols, pgData, skipCols)
 }
 
 // validateNoPKWithBucket wraps full-table PG query + bucket validation.
-func (v *Validator) validateNoPKWithBucket(ctx context.Context, pgDB, tidbDB *sql.DB, table string, tr reporter.TableReport, schema string) reporter.TableReport {
+func (v *Validator) validateNoPKWithBucket(ctx context.Context, pgDB *sql.DB, tidbConn *sql.Conn, table string, tr reporter.TableReport, schema string) reporter.TableReport {
 	pgQuery := fmt.Sprintf("SELECT * FROM %s.%s", quotePG(schema), quotePG(table))
 	pgRows, err := pgDB.QueryContext(ctx, pgQuery)
 	if err != nil {
@@ -794,20 +826,20 @@ func (v *Validator) validateNoPKWithBucket(ctx context.Context, pgDB, tidbDB *sq
 		pgData = append(pgData, row)
 	}
 
-	return v.validateBucketCompare(ctx, pgDB, tidbDB, table, tr, pgCols, pgData, skipCols)
+	return v.validateBucketCompare(ctx, pgDB, tidbConn, table, tr, pgCols, pgData, skipCols)
 }
 
 // validateFull runs all validation checks: row count + sampling + checksum.
 // Returns the first failure, or pass if all succeed.
-func (v *Validator) validateFull(ctx context.Context, pgDB, tidbDB *sql.DB, table string, sampleRatio float64) reporter.TableReport {
+func (v *Validator) validateFull(ctx context.Context, pgDB *sql.DB, tidbConn *sql.Conn, tidbDB *sql.DB, table string, sampleRatio float64) reporter.TableReport {
 	// Step 1: Row count check
-	tr := v.validateRowCount(ctx, pgDB, tidbDB, table)
+	tr := v.validateRowCount(ctx, pgDB, tidbConn, table)
 	if tr.Status == reporter.StatusFail {
 		return tr
 	}
 
 	// Step 2: Sampling check
-	tr = v.validateSampling(ctx, pgDB, tidbDB, table, sampleRatio)
+	tr = v.validateSampling(ctx, pgDB, tidbConn, tidbDB, table, sampleRatio)
 	if tr.Status == reporter.StatusFail {
 		return tr
 	}
@@ -826,8 +858,8 @@ func (v *Validator) validateFull(ctx context.Context, pgDB, tidbDB *sql.DB, tabl
 	return tr
 }
 
-func (v *Validator) validateChecksum(ctx context.Context, pgDB, tidbDB *sql.DB, table string) reporter.TableReport {
-	tr := v.validateRowCount(ctx, pgDB, tidbDB, table)
+func (v *Validator) validateChecksum(ctx context.Context, pgDB *sql.DB, tidbConn *sql.Conn, table string) reporter.TableReport {
+	tr := v.validateRowCount(ctx, pgDB, tidbConn, table)
 	if tr.Status == reporter.StatusFail && tr.DiffRows != 0 {
 		return tr
 	}
@@ -848,7 +880,7 @@ func (v *Validator) validateChecksum(ctx context.Context, pgDB, tidbDB *sql.DB, 
 	}
 
 	var tidbChecksum sql.NullString
-	err = tidbDB.QueryRowContext(ctx,
+	err = tidbConn.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT MD5(GROUP_CONCAT(t ORDER BY id SEPARATOR ',')) FROM (SELECT * FROM %s ORDER BY 1) t",
 			quoteMySQL(table))).Scan(&tidbChecksum)
 	if err != nil {

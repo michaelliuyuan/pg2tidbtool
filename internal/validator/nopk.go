@@ -131,7 +131,7 @@ func parseIndexColumns(indexDef string) []string {
 // a reliable unique key. It computes a hash of each row's values (sorted by
 // column name for cross-DB consistency) and compares the multiset of hashes
 // between PG and TiDB.
-func (v *Validator) validateHashGroup(ctx context.Context, pgDB, tidbDB *sql.DB, table string, tr reporter.TableReport, pgCols []*sql.ColumnType, pgData [][]string, skipCols map[int]bool) reporter.TableReport {
+func (v *Validator) validateHashGroup(ctx context.Context, pgDB *sql.DB, tidbConn *sql.Conn, table string, tr reporter.TableReport, pgCols []*sql.ColumnType, pgData [][]string, skipCols map[int]bool) reporter.TableReport {
 	logger := zap.L()
 	logger.Info("using hash group validation for no-PK table", zap.String("table", table))
 
@@ -164,7 +164,7 @@ func (v *Validator) validateHashGroup(ctx context.Context, pgDB, tidbDB *sql.DB,
 
 	// Query TiDB for the full table first so we can build a unified skip set.
 	tidbQuery := fmt.Sprintf("SELECT * FROM %s", quoteMySQL(table))
-	tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
+	tidbRows, err := tidbConn.QueryContext(ctx, tidbQuery)
 	if err != nil {
 		tr.Status = reporter.StatusFail
 		tr.Error = fmt.Sprintf("hash group: query TiDB: %v", err)
@@ -456,7 +456,7 @@ func isApproximateFloatType(dt string) bool {
 // by sorting all individual row hashes and hashing the concatenation. This gives a
 // fast yes/no answer: if the aggregate hashes match, the tables are identical.
 // If they differ, the caller should fall back to hash_group or bucket for details.
-func (v *Validator) validateAggregateHash(ctx context.Context, pgDB, tidbDB *sql.DB, table string, tr reporter.TableReport, pgCols []*sql.ColumnType, pgData [][]string, skipCols map[int]bool) reporter.TableReport {
+func (v *Validator) validateAggregateHash(ctx context.Context, pgDB *sql.DB, tidbConn *sql.Conn, table string, tr reporter.TableReport, pgCols []*sql.ColumnType, pgData [][]string, skipCols map[int]bool) reporter.TableReport {
 	logger := zap.L()
 	logger.Info("using aggregate hash validation for no-PK table", zap.String("table", table))
 
@@ -494,7 +494,7 @@ func (v *Validator) validateAggregateHash(ctx context.Context, pgDB, tidbDB *sql
 
 	// Query TiDB full table
 	tidbQuery := fmt.Sprintf("SELECT * FROM %s", quoteMySQL(table))
-	tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
+	tidbRows, err := tidbConn.QueryContext(ctx, tidbQuery)
 	if err != nil {
 		tr.Status = reporter.StatusFail
 		tr.Error = fmt.Sprintf("aggregate hash: query TiDB: %v", err)
@@ -562,7 +562,7 @@ func (v *Validator) validateAggregateHash(ctx context.Context, pgDB, tidbDB *sql
 
 // validateBucketCompare divides table rows into N buckets based on row hash modulo,
 // compares row counts per bucket, and drills into mismatched buckets using hash_group.
-func (v *Validator) validateBucketCompare(ctx context.Context, pgDB, tidbDB *sql.DB, table string, tr reporter.TableReport, pgCols []*sql.ColumnType, pgData [][]string, skipCols map[int]bool) reporter.TableReport {
+func (v *Validator) validateBucketCompare(ctx context.Context, pgDB *sql.DB, tidbConn *sql.Conn, table string, tr reporter.TableReport, pgCols []*sql.ColumnType, pgData [][]string, skipCols map[int]bool) reporter.TableReport {
 	logger := zap.L()
 	bucketCount := v.cfg.Compare.NoPKBucketCount
 	if bucketCount <= 0 {
@@ -607,7 +607,7 @@ func (v *Validator) validateBucketCompare(ctx context.Context, pgDB, tidbDB *sql
 
 	// Query TiDB full table and assign to buckets
 	tidbQuery := fmt.Sprintf("SELECT * FROM %s", quoteMySQL(table))
-	tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
+	tidbRows, err := tidbConn.QueryContext(ctx, tidbQuery)
 	if err != nil {
 		tr.Status = reporter.StatusFail
 		tr.Error = fmt.Sprintf("bucket compare: query TiDB: %v", err)
