@@ -55,7 +55,7 @@ func (b *DDLBuilder) BuildTableDDL(table TableInfo) error {
 }
 
 func (b *DDLBuilder) buildColumnDDL(col Column) (string, error) {
-	mysqlType := MapTypeWithPrecision(col.PGType, col.MaxLength, col.NumericScale)
+	mysqlType := MapTypeWithPrecision(col.PGType, col.NumericPrec, col.NumericScale)
 	if mysqlType == "" {
 		mysqlType = "TEXT"
 	}
