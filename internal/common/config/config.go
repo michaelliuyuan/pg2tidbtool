@@ -83,7 +83,7 @@ type TargetConfig struct {
 }
 
 func (t TargetConfig) DSN() string {
-	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&timeout=30s&readTimeout=300s&writeTimeout=300s",
+	return fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&loc=UTC&timeout=30s&readTimeout=300s&writeTimeout=300s",
 		t.User, t.Password, t.Host, t.Port, t.Database)
 }
 
