@@ -219,9 +219,15 @@ func (o *Orchestrator) runValidate(ctx context.Context) PipelineResult {
 	log.Info("Phase: 数据验证")
 	start := time.Now()
 
-	// Determine validation level from compare mode
+	// Resolve effective mode: never allow empty mode
+	mode := o.cfg.Compare.CompareMode
+	if mode == "" {
+		mode = "sample"
+	}
+
+	// Determine validation level from resolved mode
 	level := "L2" // default: sample
-	switch o.cfg.Compare.CompareMode {
+	switch mode {
 	case "quick":
 		level = "L1"
 	case "checksum":
@@ -235,9 +241,14 @@ func (o *Orchestrator) runValidate(ctx context.Context) PipelineResult {
 		sampleRatio = 0.01
 	}
 
+	log.Info("data validation config",
+		zap.String("mode", mode),
+		zap.String("level", level),
+		zap.Float64("sample_ratio", sampleRatio))
+
 	rpt, err := o.validator.Run(ctx, common.ValidateOpts{
 		Level:       level,
-		Mode:        o.cfg.Compare.CompareMode,
+		Mode:        mode,
 		SampleRatio: sampleRatio,
 		Tables:      o.cfg.Migration.Tables,
 		ReportFile:  "validation-report.json",

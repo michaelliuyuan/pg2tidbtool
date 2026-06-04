@@ -162,16 +162,7 @@ func (v *Validator) validateHashGroup(ctx context.Context, pgDB, tidbDB *sql.DB,
 		hashCols = append(hashCols, colMapping{pgIdx: idx, name: name})
 	}
 
-	// Compute row hashes for PG sample
-	pgHashCounts := make(map[string]int) // hash -> count
-	for _, row := range pgData {
-		h := computeRowHash(row, hashCols)
-		pgHashCounts[h]++
-	}
-
-	// Query TiDB for the full table (or same offset range as PG sample).
-	// For hash group comparison, we need ALL TiDB rows, not just a sample,
-	// because we compare multisets.
+	// Query TiDB for the full table first so we can build a unified skip set.
 	tidbQuery := fmt.Sprintf("SELECT * FROM %s", quoteMySQL(table))
 	tidbRows, err := tidbDB.QueryContext(ctx, tidbQuery)
 	if err != nil {
@@ -194,19 +185,107 @@ func (v *Validator) validateHashGroup(ctx context.Context, pgDB, tidbDB *sql.DB,
 		tidbColNameToIdx[strings.ToLower(c.Name())] = i
 	}
 
-	// Map sorted column names to TiDB column indices
+	// Build UNIFIED skip set: skip a column if it should be skipped in EITHER PG or TiDB.
+	// This ensures both sides hash the same column set, preventing systematic mismatches
+	// caused by type name differences (e.g., PG "integer[]" vs TiDB "json").
+	unifiedSkipCols := make(map[string]bool) // column name (lowercase) -> skip
+	for _, name := range sortedPGColNames {
+		lowerName := strings.ToLower(name)
+		// Check PG side
+		pgIdx, pgOk := pgColNameToIdx[lowerName]
+		if pgOk && skipCols[pgIdx] {
+			unifiedSkipCols[lowerName] = true
+			continue
+		}
+		// Check TiDB side
+		tidbIdx, tidbOk := tidbColNameToIdx[lowerName]
+		if tidbOk {
+			dt := strings.ToLower(tidbCols[tidbIdx].DatabaseTypeName())
+			if isApproximateFloatType(dt) || strings.Contains(dt, "json") {
+				unifiedSkipCols[lowerName] = true
+				continue
+			}
+		}
+	}
+
+	// Detect text-type columns for trim handling (both PG and TiDB)
+	trimCols := make(map[string]bool) // column name (lowercase) -> trim
+	for _, name := range sortedPGColNames {
+		lowerName := strings.ToLower(name)
+		pgIdx, pgOk := pgColNameToIdx[lowerName]
+		if pgOk {
+			dt := strings.ToLower(pgCols[pgIdx].DatabaseTypeName())
+			if isTextType(dt) {
+				trimCols[lowerName] = true
+			}
+		}
+		tidbIdx, tidbOk := tidbColNameToIdx[lowerName]
+		if tidbOk {
+			dt := strings.ToLower(tidbCols[tidbIdx].DatabaseTypeName())
+			if isTextType(dt) {
+				trimCols[lowerName] = true
+			}
+		}
+	}
+
+	// Rebuild hashCols using unified skip set
+	hashCols = nil
+	for _, name := range sortedPGColNames {
+		lowerName := strings.ToLower(name)
+		if unifiedSkipCols[lowerName] {
+			continue
+		}
+		idx := pgColNameToIdx[lowerName]
+		// Also skip if column doesn't exist in TiDB
+		if _, tidbOk := tidbColNameToIdx[lowerName]; !tidbOk {
+			continue
+		}
+		hashCols = append(hashCols, colMapping{pgIdx: idx, name: name})
+	}
+
+	// Build TiDB hash column mapping using same unified set
 	var tidbHashCols []tidbColMapping
 	for _, name := range sortedPGColNames {
-		idx, ok := tidbColNameToIdx[strings.ToLower(name)]
+		lowerName := strings.ToLower(name)
+		if unifiedSkipCols[lowerName] {
+			continue
+		}
+		idx, ok := tidbColNameToIdx[lowerName]
 		if !ok {
 			continue
 		}
-		// Check if this column is skipped in TiDB
-		dt := strings.ToLower(tidbCols[idx].DatabaseTypeName())
-		if isApproximateFloatType(dt) || strings.Contains(dt, "json") {
-			continue
-		}
 		tidbHashCols = append(tidbHashCols, tidbColMapping{tidbIdx: idx, name: name})
+	}
+
+	logger.Info("hash group column mapping",
+		zap.String("table", table),
+		zap.Int("pg_hash_cols", len(hashCols)),
+		zap.Int("tidb_hash_cols", len(tidbHashCols)),
+		zap.Int("skipped_cols", len(unifiedSkipCols)),
+		zap.Int("trim_cols", len(trimCols)))
+
+	// Debug: log first PG row hash details
+	if len(pgData) > 0 && len(hashCols) > 0 {
+		row := pgData[0]
+		var parts []string
+		for _, hc := range hashCols {
+			val := "\\N"
+			if hc.pgIdx < len(row) {
+				val = row[hc.pgIdx]
+			}
+			if trimCols[strings.ToLower(hc.name)] {
+				val = strings.TrimRight(val, " ")
+			}
+			parts = append(parts, fmt.Sprintf("%s=%s", hc.name, truncate(val, 30)))
+		}
+		logger.Debug("hash group: first PG row", zap.String("table", table), zap.String("cols", strings.Join(parts, ",")))
+	}
+
+	// Compute row hashes for PG (with trim handling)
+	pgHashCounts := make(map[string]int) // hash -> count
+	for _, row := range pgData {
+		h := computeRowHashTrimmed(row, hashCols, trimCols)
+		pgHashCounts[h]++
 	}
 
 	tidbValues := make([]interface{}, len(tidbCols))
@@ -215,9 +294,10 @@ func (v *Validator) validateHashGroup(ctx context.Context, pgDB, tidbDB *sql.DB,
 		tidbPtrs[i] = &tidbValues[i]
 	}
 
-	// Compute row hashes for TiDB
+	// Compute row hashes for TiDB (with trim handling)
 	tidbHashCounts := make(map[string]int)
 	tidbRowCount := 0
+	firstTiDBRow := true
 	for tidbRows.Next() {
 		if err := tidbRows.Scan(tidbPtrs...); err != nil {
 			continue
@@ -226,9 +306,26 @@ func (v *Validator) validateHashGroup(ctx context.Context, pgDB, tidbDB *sql.DB,
 		for i, val := range tidbValues {
 			tidbRow[i] = normalizeValue(val)
 		}
-		h := computeTiDBRowHash(tidbRow, tidbHashCols)
+		h := computeTiDBRowHashTrimmed(tidbRow, tidbHashCols, trimCols)
 		tidbHashCounts[h]++
 		tidbRowCount++
+
+		// Debug: log first TiDB row hash details
+		if firstTiDBRow && len(tidbHashCols) > 0 {
+			var parts []string
+			for _, hc := range tidbHashCols {
+				val := "\\N"
+				if hc.tidbIdx < len(tidbRow) {
+					val = tidbRow[hc.tidbIdx]
+				}
+				if trimCols[strings.ToLower(hc.name)] {
+					val = strings.TrimRight(val, " ")
+				}
+				parts = append(parts, fmt.Sprintf("%s=%s", hc.name, truncate(val, 30)))
+			}
+			logger.Debug("hash group: first TiDB row", zap.String("table", table), zap.String("cols", strings.Join(parts, ",")))
+			firstTiDBRow = false
+		}
 	}
 
 	// Compare multisets
@@ -291,6 +388,25 @@ func computeRowHash(row []string, hashCols []colMapping) string {
 	return fmt.Sprintf("%x", md5.Sum([]byte(buf.String())))
 }
 
+// computeRowHashTrimmed computes MD5 with trim handling for text columns.
+func computeRowHashTrimmed(row []string, hashCols []colMapping, trimCols map[string]bool) string {
+	var buf strings.Builder
+	for i, hc := range hashCols {
+		if i > 0 {
+			buf.WriteByte('|')
+		}
+		val := "\\N"
+		if hc.pgIdx < len(row) {
+			val = row[hc.pgIdx]
+		}
+		if trimCols[strings.ToLower(hc.name)] {
+			val = strings.TrimRight(val, " ")
+		}
+		buf.WriteString(val)
+	}
+	return fmt.Sprintf("%x", md5.Sum([]byte(buf.String())))
+}
+
 // computeTiDBRowHash computes MD5 of a TiDB row's values, using only the
 // columns specified in hashCols, joined by "|" in sorted column name order.
 func computeTiDBRowHash(row []string, hashCols []tidbColMapping) string {
@@ -302,6 +418,25 @@ func computeTiDBRowHash(row []string, hashCols []tidbColMapping) string {
 		val := "\\N"
 		if hc.tidbIdx < len(row) {
 			val = row[hc.tidbIdx]
+		}
+		buf.WriteString(val)
+	}
+	return fmt.Sprintf("%x", md5.Sum([]byte(buf.String())))
+}
+
+// computeTiDBRowHashTrimmed computes MD5 with trim handling for text columns.
+func computeTiDBRowHashTrimmed(row []string, hashCols []tidbColMapping, trimCols map[string]bool) string {
+	var buf strings.Builder
+	for i, hc := range hashCols {
+		if i > 0 {
+			buf.WriteByte('|')
+		}
+		val := "\\N"
+		if hc.tidbIdx < len(row) {
+			val = row[hc.tidbIdx]
+		}
+		if trimCols[strings.ToLower(hc.name)] {
+			val = strings.TrimRight(val, " ")
 		}
 		buf.WriteString(val)
 	}
@@ -601,5 +736,17 @@ func hexVal(c byte) uint32 {
 		return uint32(c - 'A' + 10)
 	default:
 		return 0
+	}
+}
+
+// isTextType checks if a database type is a text/character type that may
+// have trailing space differences between PG and TiDB/MySQL.
+func isTextType(dt string) bool {
+	switch dt {
+	case "character", "char", "bpchar", "character varying", "varchar", "text",
+		"tinytext", "mediumtext", "longtext":
+		return true
+	default:
+		return false
 	}
 }
