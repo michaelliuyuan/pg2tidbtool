@@ -232,7 +232,11 @@ func (o *Orchestrator) runValidate(ctx context.Context) PipelineResult {
 	start := time.Now()
 
 	if o.cpMgr != nil {
-		o.cpMgr.SetPhase("validate")
+		// Use SetPhaseWithReload to reload checkpoint from disk first.
+		// The data migrator writes table progress via its own cpMgr; if we
+		// use SetPhase, the orchestrator's stale in-memory state (with no
+		// tables) would overwrite the data migrator's progress.
+		o.cpMgr.SetPhaseWithReload("validate")
 	}
 
 	// Resolve effective mode: never allow empty mode
