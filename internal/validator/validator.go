@@ -123,8 +123,6 @@ func (v *Validator) Run(ctx context.Context, opts common.ValidateOpts) (*reporte
 				tr = v.validateSampling(ctx, pgDB, tidbConn, tidbDB, tableName, opts.SampleRatio)
 			case "checksum":
 				tr = v.validateChecksum(ctx, pgDB, tidbConn, tableName)
-			case "full":
-				tr = v.validateFull(ctx, pgDB, tidbConn, tidbDB, tableName, opts.SampleRatio)
 			default:
 				tr = reporter.TableReport{
 					TableName: tableName,
@@ -827,35 +825,6 @@ func (v *Validator) validateNoPKWithBucket(ctx context.Context, pgDB *sql.DB, ti
 	}
 
 	return v.validateBucketCompare(ctx, pgDB, tidbConn, table, tr, pgCols, pgData, skipCols)
-}
-
-// validateFull runs all validation checks: row count + sampling + checksum.
-// Returns the first failure, or pass if all succeed.
-func (v *Validator) validateFull(ctx context.Context, pgDB *sql.DB, tidbConn *sql.Conn, tidbDB *sql.DB, table string, sampleRatio float64) reporter.TableReport {
-	// Step 1: Row count check
-	tr := v.validateRowCount(ctx, pgDB, tidbConn, table)
-	if tr.Status == reporter.StatusFail {
-		return tr
-	}
-
-	// Step 2: Sampling check
-	tr = v.validateSampling(ctx, pgDB, tidbConn, tidbDB, table, sampleRatio)
-	if tr.Status == reporter.StatusFail {
-		return tr
-	}
-
-	// Step 3: Checksum (if table has PK, use chunked; otherwise hash_group covers it)
-	schema := v.cfg.Source.Schema
-	if schema == "" {
-		schema = "public"
-	}
-	keyInfo, _ := v.detectTableKey(ctx, pgDB, schema, table)
-	if keyInfo != nil && (keyInfo.HasPK || keyInfo.HasUniqueIndex) {
-		tr = v.validateChecksumChunked(ctx, pgDB, tidbDB, table)
-	}
-	// If no PK, sampling already used hash_group which is exact
-
-	return tr
 }
 
 func (v *Validator) validateChecksum(ctx context.Context, pgDB *sql.DB, tidbConn *sql.Conn, table string) reporter.TableReport {

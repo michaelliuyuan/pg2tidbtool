@@ -40,7 +40,6 @@ type CompareConfig struct {
 	//   "quick"    — fast row count estimation only
 	//   "sample"   — row count + random sampling (default)
 	//   "checksum" — row count + chunked hash comparison
-	//   "full"     — all validations combined
 	CompareMode string `yaml:"compare_mode" json:"compareMode"`
 
 	// SampleRatio for sample mode: fraction of rows to sample (0.0-1.0).

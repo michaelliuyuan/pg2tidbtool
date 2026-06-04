@@ -129,7 +129,6 @@ const compareModes = [
   { value: 'quick', label: '\u26A1 快速', color: '#67c23a', desc: '仅行数估算，最快' },
   { value: 'sample', label: '\uD83D\uDDD1 采样', color: '#409eff', desc: '行数+随机采样（推荐）' },
   { value: 'checksum', label: '\uD83D\uDFE1 校验', color: '#e6a23c', desc: '行数+分块Hash' },
-  { value: 'full', label: '\uD83D\uDFE5 全量', color: '#f56c6c', desc: '全部验证，最慢' },
 ]
 
 const rules: FormRules = {

@@ -232,8 +232,6 @@ func (o *Orchestrator) runValidate(ctx context.Context) PipelineResult {
 		level = "L1"
 	case "checksum":
 		level = "L3"
-	case "full":
-		level = "L2" // full uses L2 dispatch with full mode handling in validator
 	}
 
 	sampleRatio := o.cfg.Compare.SampleRatio
