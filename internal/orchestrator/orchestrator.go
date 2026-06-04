@@ -129,6 +129,10 @@ func (o *Orchestrator) runPrecheck(ctx context.Context) PipelineResult {
 	log.Info("Phase: 预检查")
 	start := time.Now()
 
+	if o.cpMgr != nil {
+		o.cpMgr.SetPhase("precheck")
+	}
+
 	rpt, err := o.prechecker.Run(ctx, common.PrecheckOpts{
 		ReportFile: "precheck-report.json",
 	})
@@ -158,6 +162,10 @@ func (o *Orchestrator) runSchema(ctx context.Context) PipelineResult {
 	log.Info("Phase: Schema 迁移")
 	start := time.Now()
 
+	if o.cpMgr != nil {
+		o.cpMgr.SetPhase("schema")
+	}
+
 	err := o.schemaMig.Run(ctx, common.SchemaOpts{})
 
 	result := PipelineResult{
@@ -183,6 +191,10 @@ func (o *Orchestrator) runData(ctx context.Context) PipelineResult {
 	log := zap.L()
 	log.Info("Phase: 数据迁移")
 	start := time.Now()
+
+	if o.cpMgr != nil {
+		o.cpMgr.SetPhase("data")
+	}
 
 	dataResult, err := o.dataMig.Run(ctx, common.DataOpts{
 		Parallel:      o.cfg.Migration.Parallel,
@@ -218,6 +230,10 @@ func (o *Orchestrator) runValidate(ctx context.Context) PipelineResult {
 	log := zap.L()
 	log.Info("Phase: 数据验证")
 	start := time.Now()
+
+	if o.cpMgr != nil {
+		o.cpMgr.SetPhase("validate")
+	}
 
 	// Resolve effective mode: never allow empty mode
 	mode := o.cfg.Compare.CompareMode
