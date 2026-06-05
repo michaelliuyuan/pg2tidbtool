@@ -142,9 +142,9 @@ func (a *Assessor) checkDataTypes(result *ScanResult) DimensionResult {
 			s.add(Finding{
 				Dimension: DimDataType, ObjectType: "column",
 				ObjectName: objName,
-				Level: LevelConvertible,
-				PGDetail: "boolean", TiDBDetail: "TINYINT(1)",
-				Suggestion: "布尔值 true/false → 1/0", AutoFix: true,
+				Level: LevelCompatible,
+				PGDetail: "boolean", TiDBDetail: "BOOLEAN",
+				Suggestion: "", AutoFix: true,
 			})
 		case dt == "date":
 			s.add(Finding{
