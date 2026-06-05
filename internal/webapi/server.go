@@ -2,6 +2,7 @@ package webapi
 
 import (
 	"context"
+	"database/sql"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ import (
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/logger"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/reporter"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/orchestrator"
+	"github.com/pg2tidb/pg2tidb-migrator/internal/assess"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/store"
 	"go.uber.org/zap"
 )
@@ -121,6 +123,7 @@ func NewServer(store *store.Store, host string, port int, dataDir string, static
 			r.Get("/phases", s.handleTaskPhases)
 		})
 		r.Get("/ws", s.handleWebSocket)
+			r.Post("/assess", s.handleAssess)
 	})
 
 	if staticFS != (embed.FS{}) {
@@ -1102,4 +1105,69 @@ func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
 		"phase":   task.Phase,
 		"phases":  phases,
 	})
+}
+
+// handleAssess runs a compatibility assessment and returns JSON for the frontend.
+func (s *Server) handleAssess(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Host     string `json:"host"`
+		Port     int    `json:"port"`
+		User     string `json:"user"`
+		Password string `json:"password"`
+		Database string `json:"database"`
+		Schema   string `json:"schema"`
+		Format   string `json:"format"` // "json" (default) or "html"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.Host == "" || req.Database == "" {
+		s.writeError(w, http.StatusBadRequest, "host and database are required")
+		return
+	}
+	if req.Schema == "" {
+		req.Schema = "public"
+	}
+	if req.Port == 0 {
+		req.Port = 5432
+	}
+
+	dsn := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+		req.User, req.Password, req.Host, req.Port, req.Database)
+
+	pgDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "connect failed: "+err.Error())
+		return
+	}
+	defer pgDB.Close()
+
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+
+	// Scan and assess
+	scanner := assess.NewScanner(pgDB, req.Schema)
+	result, err := scanner.ScanAll(ctx)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "scan failed: "+err.Error())
+		return
+	}
+
+	assessor := assess.NewAssessor()
+	dims := assessor.Assess(result)
+
+	rg := assess.NewReportGenerator(dims)
+
+	// If HTML format requested, return HTML
+	if req.Format == "html" {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		rg.WriteHTML(w)
+		return
+	}
+
+	// Default: return JSON
+	report := rg.Report()
+	s.writeJSON(w, http.StatusOK, report)
 }

@@ -31,6 +31,10 @@ const route = useRoute()
           <el-icon><Clock /></el-icon>
           <span>迁移历史</span>
         </el-menu-item>
+        <el-menu-item index="/assess">
+          <el-icon><DataAnalysis /></el-icon>
+          <span>兼容性评估</span>
+        </el-menu-item>
       </el-menu>
     </el-header>
     <el-main style="background: #f5f7fa; padding: 24px;">
