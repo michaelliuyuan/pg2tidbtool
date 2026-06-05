@@ -1164,7 +1164,7 @@ func truncate(s string, maxLen int) string {
 }
 
 // diagnoseRowDiff compares a PG row and TiDB row column-by-column and returns
-// a diagnostic string listing the first few column differences.
+// a diagnostic string listing the first few column differences with precise diff location.
 func diagnoseRowDiff(
 	pgRow []string, tidbRow []string,
 	pgHashCols []colMapping, tidbHashCols []tidbColMapping,
@@ -1177,16 +1177,16 @@ func diagnoseRowDiff(
 		pgHC := pgHashCols[i]
 		tidbHC := tidbHashCols[i]
 
-		pgVal := "N"
+		pgVal := "\\N"
 		if pgHC.pgIdx < len(pgRow) {
 			pgVal = pgRow[pgHC.pgIdx]
 		}
-		tidbVal := "N"
+		tidbVal := "\\N"
 		if tidbHC.tidbIdx < len(tidbRow) {
 			tidbVal = tidbRow[tidbHC.tidbIdx]
 		}
 
-		// Apply trim if this is a text column
+		// Apply trim if this is a text column (same as hash computation)
 		if trimColNames[strings.ToLower(pgHC.name)] {
 			pgVal = trimTrailingWhitespace(pgVal)
 			tidbVal = trimTrailingWhitespace(tidbVal)
@@ -1201,7 +1201,28 @@ func diagnoseRowDiff(
 			if tidbHC.tidbIdx < len(tidbCols) {
 				tidbType = tidbCols[tidbHC.tidbIdx].DatabaseTypeName()
 			}
-			diffs = append(diffs, fmt.Sprintf("%s PG(%s)=%q TiDB(%s)=%q", pgHC.name, pgType, truncate(pgVal, 60), tidbType, truncate(tidbVal, 60)))
+
+			// Find first byte difference position
+			diffPos := 0
+			minLen := len(pgVal)
+			if len(tidbVal) < minLen {
+				minLen = len(tidbVal)
+			}
+			for diffPos = 0; diffPos < minLen; diffPos++ {
+				if pgVal[diffPos] != tidbVal[diffPos] {
+					break
+				}
+			}
+
+			// Show hex of bytes starting from diff position
+			pgHex := fmt.Sprintf("%x", []byte(pgVal[diffPos:]))
+			if len(pgHex) > 80 { pgHex = pgHex[:80] + "..." }
+			tidbHex := fmt.Sprintf("%x", []byte(tidbVal[diffPos:]))
+			if len(tidbHex) > 80 { tidbHex = tidbHex[:80] + "..." }
+
+			diffs = append(diffs, fmt.Sprintf("%s PG(%s)[len=%d] TiDB(%s)[len=%d] diff@byte%d pg_hex_after=%s tidb_hex_after=%s",
+				pgHC.name, pgType, len(pgVal), tidbType, len(tidbVal), diffPos,
+				pgHex, tidbHex))
 		}
 	}
 	if len(diffs) == 0 {
@@ -1209,3 +1230,4 @@ func diagnoseRowDiff(
 	}
 	return " diff=[" + strings.Join(diffs, "; ") + "]"
 }
+
