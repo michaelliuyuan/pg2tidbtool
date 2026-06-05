@@ -55,7 +55,14 @@ func (b *DDLBuilder) BuildTableDDL(table TableInfo) error {
 }
 
 func (b *DDLBuilder) buildColumnDDL(col Column) (string, error) {
-	mysqlType := MapTypeWithPrecision(col.PGType, col.NumericPrec, col.NumericScale)
+	// For character types, MaxLength holds character_maximum_length;
+	// for numeric types, NumericPrec/NumericScale hold the precision.
+	// Pass the correct precision based on column type.
+	precision := col.NumericPrec
+	if col.PGType == PGVarchar || col.PGType == PGChar {
+		precision = col.MaxLength
+	}
+	mysqlType := MapTypeWithPrecision(col.PGType, precision, col.NumericScale)
 	if mysqlType == "" {
 		mysqlType = "TEXT"
 	}
