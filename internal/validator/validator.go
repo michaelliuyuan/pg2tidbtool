@@ -552,12 +552,14 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB *sql.DB, tidbConn
 			key  string
 		}
 		pgHashMap := make(map[string][]pgRowEntry) // hash -> entries
-		for _, row := range pgData {
+		pgKeyToIdx := make(map[string]int)         // key -> pgData index for diagnostics
+		for rowIdx, row := range pgData {
 			if len(keyColIndices) == 0 {
 				continue
 			}
 			h := computeRowHashTrimmed(row, pgHashCols, trimColNames)
 			key := buildKey(row)
+			pgKeyToIdx[key] = rowIdx
 			pgHashMap[h] = append(pgHashMap[h], pgRowEntry{hash: h, key: key})
 		}
 
@@ -601,7 +603,13 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB *sql.DB, tidbConn
 			if !found || len(entries) == 0 {
 				key := buildTiDBKeyFromRow(tidbRow)
 				mismatchCount++
-				mismatchDetails = append(mismatchDetails, fmt.Sprintf("hash=%s not found in PG (key=%s)", truncate(h, 16), truncate(key, 40)))
+				diag := ""
+				if mismatchCount <= 3 {
+					if pgIdx, ok := pgKeyToIdx[key]; ok {
+						diag = diagnoseRowDiff(pgData[pgIdx], tidbRow, pgHashCols, tidbHashCols, trimColNames, pgCols, tidbCols)
+					}
+				}
+				mismatchDetails = append(mismatchDetails, fmt.Sprintf("hash=%s not found in PG (key=%s)%s", truncate(h, 16), truncate(key, 40), diag))
 				continue
 			}
 			// Remove first matching entry
@@ -1153,4 +1161,51 @@ func truncate(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// diagnoseRowDiff compares a PG row and TiDB row column-by-column and returns
+// a diagnostic string listing the first few column differences.
+func diagnoseRowDiff(
+	pgRow []string, tidbRow []string,
+	pgHashCols []colMapping, tidbHashCols []tidbColMapping,
+	trimColNames map[string]bool,
+	pgCols []*sql.ColumnType, tidbCols []*sql.ColumnType,
+) string {
+	var diffs []string
+	maxDiffs := 3
+	for i := 0; i < len(pgHashCols) && i < len(tidbHashCols) && len(diffs) < maxDiffs; i++ {
+		pgHC := pgHashCols[i]
+		tidbHC := tidbHashCols[i]
+
+		pgVal := "N"
+		if pgHC.pgIdx < len(pgRow) {
+			pgVal = pgRow[pgHC.pgIdx]
+		}
+		tidbVal := "N"
+		if tidbHC.tidbIdx < len(tidbRow) {
+			tidbVal = tidbRow[tidbHC.tidbIdx]
+		}
+
+		// Apply trim if this is a text column
+		if trimColNames[strings.ToLower(pgHC.name)] {
+			pgVal = trimTrailingWhitespace(pgVal)
+			tidbVal = trimTrailingWhitespace(tidbVal)
+		}
+
+		if pgVal != tidbVal {
+			pgType := "?"
+			if pgHC.pgIdx < len(pgCols) {
+				pgType = pgCols[pgHC.pgIdx].DatabaseTypeName()
+			}
+			tidbType := "?"
+			if tidbHC.tidbIdx < len(tidbCols) {
+				tidbType = tidbCols[tidbHC.tidbIdx].DatabaseTypeName()
+			}
+			diffs = append(diffs, fmt.Sprintf("%s PG(%s)=%q TiDB(%s)=%q", pgHC.name, pgType, truncate(pgVal, 60), tidbType, truncate(tidbVal, 60)))
+		}
+	}
+	if len(diffs) == 0 {
+		return " [hash-diff-but-all-cols-match?]"
+	}
+	return " diff=[" + strings.Join(diffs, "; ") + "]"
 }
