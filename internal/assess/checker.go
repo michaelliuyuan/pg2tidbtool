@@ -518,10 +518,10 @@ func (a *Assessor) checkFunctions(result *ScanResult) DimensionResult {
 		s.add(Finding{
 			Dimension: DimFunction, ObjectType: "function",
 			ObjectName: objName,
-			Level: LevelIncompatible,
+			Level: LevelConvertible,
 			PGDetail: fmt.Sprintf("%s (%s)", fn.Language, fn.ReturnType),
-			TiDBDetail: "不支持 PL/pgSQL",
-			Suggestion: fmt.Sprintf("函数 %s 需要在应用层重新实现", fn.Name),
+			TiDBDetail: "需改写为 MySQL 兼容语法",
+			Suggestion: fmt.Sprintf("函数 %s 需改写为 TiDB 兼容的 MySQL 语法", fn.Name),
 			AutoFix: false,
 		})
 	}
@@ -542,10 +542,11 @@ func (a *Assessor) checkTriggers(result *ScanResult) DimensionResult {
 		s.add(Finding{
 			Dimension: DimTrigger, ObjectType: "trigger",
 			ObjectName: objName,
-			Level: LevelIncompatible,
+			Level: LevelConvertible,
 			PGDetail: fmt.Sprintf("%s %s", trig.Timing, trig.EventType),
-			TiDBDetail: "不支持",
-			Suggestion: "TiDB 不支持触发器，需在应用层实现业务逻辑", AutoFix: false,
+			TiDBDetail: "需改写为 MySQL 兼容语法",
+			Suggestion: "触发器需改写为 TiDB 兼容的 MySQL 触发器语法",
+			AutoFix: false,
 		})
 	}
 

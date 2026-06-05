@@ -32,7 +32,10 @@ const loading = ref(false)
 const report = ref<AssessReport | null>(null)
 const htmlReportUrl = ref('')
 
-const sourceForm = ref({
+const STORAGE_KEY = 'pg2tidb-assess-source'
+
+const savedSource = localStorage.getItem(STORAGE_KEY)
+const sourceForm = ref(savedSource ? JSON.parse(savedSource) : {
   host: '',
   port: 5432,
   user: 'postgres',
@@ -40,6 +43,17 @@ const sourceForm = ref({
   database: '',
   schema: 'public'
 })
+
+function saveSourceConfig() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(sourceForm.value))
+  ElMessage.success('数据源配置已保存')
+}
+
+function clearSourceConfig() {
+  localStorage.removeItem(STORAGE_KEY)
+  sourceForm.value = { host: '', port: 5432, user: 'postgres', password: '', database: '', schema: 'public' }
+  ElMessage.info('已清除保存的配置')
+}
 
 const levelEmoji: Record<string, string> = {
   compatible: '✅',
@@ -181,6 +195,8 @@ async function downloadHTML() {
           <el-button type="primary" @click="runAssess" :loading="loading">
             {{ loading ? '评估中...' : '🔍 开始评估' }}
           </el-button>
+          <el-button @click="saveSourceConfig">💾 保存配置</el-button>
+          <el-button @click="clearSourceConfig" text type="info">清除</el-button>
         </el-form-item>
       </el-form>
     </el-card>
