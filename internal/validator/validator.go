@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -383,15 +384,6 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB *sql.DB, tidbConn
 		return strings.Join(parts, "|")
 	}
 
-	pgMap := make(map[string][][]string)
-	for _, row := range pgData {
-		if len(row) == 0 || len(keyColIndices) == 0 {
-			continue
-		}
-		key := buildKey(row)
-		pgMap[key] = append(pgMap[key], row)
-	}
-
 	var mismatchCount int
 	var mismatchDetails []string
 
@@ -466,54 +458,135 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB *sql.DB, tidbConn
 			tidbPtrs[i] = &tidbValues[i]
 		}
 
-		tidbSkipCols := make(map[int]bool)
-		tidbTrimCols := make(map[int]bool)
-		tidbToPG := make(map[int]int)
+		// Build sorted column list for hash-based row comparison.
+		// Hash-based comparison is more robust than per-column comparison
+		// because it reuses the same normalizeValue + trim pipeline that
+		// the hash_group and aggregate modes already use and test against.
+		pgColNames := make([]string, len(pgCols))
+		pgColNameToIdx := make(map[string]int)
+		for i, c := range pgCols {
+			pgColNames[i] = c.Name()
+			pgColNameToIdx[strings.ToLower(c.Name())] = i
+		}
+		sortedPGColNames := make([]string, len(pgColNames))
+		copy(sortedPGColNames, pgColNames)
+		sort.Strings(sortedPGColNames)
+
+		tidbColNameToIdx := make(map[string]int)
 		for i, c := range tidbCols {
-			dt := strings.ToLower(c.DatabaseTypeName())
-			if isApproximateFloatType(dt) || strings.Contains(dt, "json") {
-				tidbSkipCols[i] = true
+			tidbColNameToIdx[strings.ToLower(c.Name())] = i
+		}
+
+		// Build unified skip set (column name lowercase -> skip).
+		// Skip a column if it should be skipped on EITHER side.
+		unifiedSkipCols := make(map[string]bool)
+		for _, name := range sortedPGColNames {
+			lowerName := strings.ToLower(name)
+			pgIdx, pgOk := pgColNameToIdx[lowerName]
+			if pgOk && skipCols[pgIdx] {
+				unifiedSkipCols[lowerName] = true
+				continue
 			}
-			if dt == "character" || dt == "char" || dt == "bpchar" || dt == "character varying" || dt == "varchar" || dt == "text" {
-				tidbTrimCols[i] = true
-			}
-			colName := strings.ToLower(c.Name())
-			for pi, pc := range pgCols {
-				if strings.ToLower(pc.Name()) == colName {
-					tidbToPG[i] = pi
-					break
+			tidbIdx, tidbOk := tidbColNameToIdx[lowerName]
+			if tidbOk {
+				dt := strings.ToLower(tidbCols[tidbIdx].DatabaseTypeName())
+				if isApproximateFloatType(dt) || strings.Contains(dt, "json") {
+					unifiedSkipCols[lowerName] = true
+					continue
 				}
 			}
 		}
 
-		var tidbKeyColIndices []int
+		// Build unified trim set (column name lowercase -> trim).
+		trimColNames := make(map[string]bool)
+		for _, name := range sortedPGColNames {
+			lowerName := strings.ToLower(name)
+			pgIdx, pgOk := pgColNameToIdx[lowerName]
+			if pgOk {
+				dt := strings.ToLower(pgCols[pgIdx].DatabaseTypeName())
+				if isTextType(dt) {
+					trimColNames[lowerName] = true
+				}
+			}
+			tidbIdx, tidbOk := tidbColNameToIdx[lowerName]
+			if tidbOk {
+				dt := strings.ToLower(tidbCols[tidbIdx].DatabaseTypeName())
+				if isTextType(dt) {
+					trimColNames[lowerName] = true
+				}
+			}
+		}
+
+		// Build PG hash column mapping (sorted by name, skipping unified skips).
+		var pgHashCols []colMapping
+		for _, name := range sortedPGColNames {
+			lowerName := strings.ToLower(name)
+			if unifiedSkipCols[lowerName] {
+				continue
+			}
+			idx := pgColNameToIdx[lowerName]
+			if _, tidbOk := tidbColNameToIdx[lowerName]; !tidbOk {
+				continue
+			}
+			pgHashCols = append(pgHashCols, colMapping{pgIdx: idx, name: name})
+		}
+
+		// Build TiDB hash column mapping using same unified set.
+		var tidbHashCols []tidbColMapping
+		for _, name := range sortedPGColNames {
+			lowerName := strings.ToLower(name)
+			if unifiedSkipCols[lowerName] {
+				continue
+			}
+			idx, ok := tidbColNameToIdx[lowerName]
+			if !ok {
+				continue
+			}
+			tidbHashCols = append(tidbHashCols, tidbColMapping{tidbIdx: idx, name: name})
+		}
+
+		// Compute row hashes for PG sample data (hash -> list of keys for
+		// disambiguation when multiple rows share the same hash).
+		type pgRowEntry struct {
+			hash string
+			key  string
+		}
+		pgHashMap := make(map[string][]pgRowEntry) // hash -> entries
+		for _, row := range pgData {
+			if len(keyColIndices) == 0 {
+				continue
+			}
+			h := computeRowHashTrimmed(row, pgHashCols, trimColNames)
+			key := buildKey(row)
+			pgHashMap[h] = append(pgHashMap[h], pgRowEntry{hash: h, key: key})
+		}
+
+		// Build TiDB key builder for error reporting.
+		tidbKeyColIndices := make(map[string]int) // PG col name (lower) -> TiDB col index
 		for _, pgIdx := range keyColIndices {
 			colName := strings.ToLower(pgCols[pgIdx].Name())
 			for i, c := range tidbCols {
 				if strings.ToLower(c.Name()) == colName {
-					tidbKeyColIndices = append(tidbKeyColIndices, i)
+					tidbKeyColIndices[colName] = i
 					break
 				}
 			}
 		}
-
-		buildTiDBKey := func(row []string) string {
+		buildTiDBKeyFromRow := func(row []string) string {
 			var parts []string
-			for _, idx := range tidbKeyColIndices {
-				if idx < len(row) {
-					parts = append(parts, row[idx])
+			for _, pgIdx := range keyColIndices {
+				colName := strings.ToLower(pgCols[pgIdx].Name())
+				if ti, ok := tidbKeyColIndices[colName]; ok && ti < len(row) {
+					parts = append(parts, row[ti])
 				} else {
 					parts = append(parts, "\\N")
 				}
 			}
 			return strings.Join(parts, "|")
 		}
-
 		for tidbRows.Next() {
 			if err := tidbRows.Scan(tidbPtrs...); err != nil {
-				tr.Status = reporter.StatusFail
-				tr.Error = fmt.Sprintf("scan TiDB row: %v", err)
-				return tr
+				continue
 			}
 			tidbRow := make([]string, len(tidbValues))
 			for i, val := range tidbValues {
@@ -523,80 +596,27 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB *sql.DB, tidbConn
 				continue
 			}
 
-			key := buildTiDBKey(tidbRow)
-			pgCandidates, found := pgMap[key]
-			if !found || len(pgCandidates) == 0 {
+			h := computeTiDBRowHashTrimmed(tidbRow, tidbHashCols, trimColNames)
+			entries, found := pgHashMap[h]
+			if !found || len(entries) == 0 {
+				key := buildTiDBKeyFromRow(tidbRow)
 				mismatchCount++
-				mismatchDetails = append(mismatchDetails, fmt.Sprintf("key %q in TiDB but not in PG sample", truncate(key, 40)))
+				mismatchDetails = append(mismatchDetails, fmt.Sprintf("hash=%s not found in PG (key=%s)", truncate(h, 16), truncate(key, 40)))
 				continue
 			}
-
-			matched := false
-			for ci, pgRow := range pgCandidates {
-				rowMatch := true
-				for tidbColIdx, tidbVal := range tidbRow {
-					if tidbSkipCols[tidbColIdx] {
-						continue
-					}
-					pgColIdx, mapped := tidbToPG[tidbColIdx]
-					if !mapped {
-						continue
-					}
-					pgVal := ""
-					if pgColIdx < len(pgRow) {
-						pgVal = pgRow[pgColIdx]
-					}
-					if tidbTrimCols[tidbColIdx] {
-						pgVal = trimTrailingWhitespace(pgVal)
-						tidbVal = trimTrailingWhitespace(tidbVal)
-					}
-					if pgVal != tidbVal {
-						rowMatch = false
-						break
-					}
-				}
-				if rowMatch {
-					pgMap[key] = append(pgCandidates[:ci], pgCandidates[ci+1:]...)
-					matched = true
-					break
-				}
-			}
-			if !matched {
-				mismatchCount++
-				pgRow := pgCandidates[0]
-				for tidbColIdx, tidbVal := range tidbRow {
-					if tidbSkipCols[tidbColIdx] {
-						continue
-					}
-					pgColIdx, mapped := tidbToPG[tidbColIdx]
-					if !mapped {
-						continue
-					}
-					pgVal := ""
-					if pgColIdx < len(pgRow) {
-						pgVal = pgRow[pgColIdx]
-					}
-					if tidbTrimCols[tidbColIdx] {
-						pgVal = trimTrailingWhitespace(pgVal)
-						tidbVal = trimTrailingWhitespace(tidbVal)
-					}
-					if pgVal != tidbVal {
-						colName := tidbCols[tidbColIdx].Name()
-						mismatchDetails = append(mismatchDetails, fmt.Sprintf("key=%s col %q: PG=%q TiDB=%q", truncate(key, 20), colName, truncate(pgVal, 80), truncate(tidbVal, 80)))
-						break
-					}
-				}
+			// Remove first matching entry
+			if len(entries) > 1 {
+				pgHashMap[h] = entries[1:]
+			} else {
+				delete(pgHashMap, h)
 			}
 		}
 
-		for _, row := range pgData {
-			if len(keyColIndices) == 0 {
-				continue
-			}
-			key := buildKey(row)
-			if candidates, ok := pgMap[key]; ok && len(candidates) > 0 {
+		// Any remaining PG entries were not matched by TiDB.
+		for _, entries := range pgHashMap {
+			for _, e := range entries {
 				mismatchCount++
-				mismatchDetails = append(mismatchDetails, fmt.Sprintf("key %q in PG but not found in TiDB", truncate(key, 40)))
+				mismatchDetails = append(mismatchDetails, fmt.Sprintf("hash=%s in PG but not found in TiDB (key=%s)", truncate(e.hash, 16), truncate(e.key, 40)))
 			}
 		}
 
