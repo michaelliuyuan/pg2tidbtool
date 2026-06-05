@@ -274,7 +274,7 @@ func (v *Validator) validateHashGroup(ctx context.Context, pgDB *sql.DB, tidbCon
 				val = row[hc.pgIdx]
 			}
 			if trimCols[strings.ToLower(hc.name)] {
-				val = strings.TrimRight(val, " ")
+				val = trimTrailingWhitespace(val)
 			}
 			parts = append(parts, fmt.Sprintf("%s=%s", hc.name, truncate(val, 30)))
 		}
@@ -319,7 +319,7 @@ func (v *Validator) validateHashGroup(ctx context.Context, pgDB *sql.DB, tidbCon
 					val = tidbRow[hc.tidbIdx]
 				}
 				if trimCols[strings.ToLower(hc.name)] {
-					val = strings.TrimRight(val, " ")
+					val = trimTrailingWhitespace(val)
 				}
 				parts = append(parts, fmt.Sprintf("%s=%s", hc.name, truncate(val, 30)))
 			}
@@ -400,7 +400,7 @@ func computeRowHashTrimmed(row []string, hashCols []colMapping, trimCols map[str
 			val = row[hc.pgIdx]
 		}
 		if trimCols[strings.ToLower(hc.name)] {
-			val = strings.TrimRight(val, " ")
+			val = trimTrailingWhitespace(val)
 		}
 		buf.WriteString(val)
 	}
@@ -436,7 +436,7 @@ func computeTiDBRowHashTrimmed(row []string, hashCols []tidbColMapping, trimCols
 			val = row[hc.tidbIdx]
 		}
 		if trimCols[strings.ToLower(hc.name)] {
-			val = strings.TrimRight(val, " ")
+			val = trimTrailingWhitespace(val)
 		}
 		buf.WriteString(val)
 	}

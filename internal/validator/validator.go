@@ -547,8 +547,8 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB *sql.DB, tidbConn
 						pgVal = pgRow[pgColIdx]
 					}
 					if tidbTrimCols[tidbColIdx] {
-						pgVal = strings.TrimRight(pgVal, " ")
-						tidbVal = strings.TrimRight(tidbVal, " ")
+						pgVal = trimTrailingWhitespace(pgVal)
+						tidbVal = trimTrailingWhitespace(tidbVal)
 					}
 					if pgVal != tidbVal {
 						rowMatch = false
@@ -577,8 +577,8 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB *sql.DB, tidbConn
 						pgVal = pgRow[pgColIdx]
 					}
 					if tidbTrimCols[tidbColIdx] {
-						pgVal = strings.TrimRight(pgVal, " ")
-						tidbVal = strings.TrimRight(tidbVal, " ")
+						pgVal = trimTrailingWhitespace(pgVal)
+						tidbVal = trimTrailingWhitespace(tidbVal)
 					}
 					if pgVal != tidbVal {
 						colName := tidbCols[tidbColIdx].Name()
@@ -635,8 +635,8 @@ func (v *Validator) validateSampling(ctx context.Context, pgDB *sql.DB, tidbConn
 					}
 					tidbVal := normalizeValue(val)
 					if trimCols[colIdx] {
-						pgVal = strings.TrimRight(pgVal, " ")
-						tidbVal = strings.TrimRight(tidbVal, " ")
+						pgVal = trimTrailingWhitespace(pgVal)
+						tidbVal = trimTrailingWhitespace(tidbVal)
 					}
 					if pgVal != tidbVal {
 						mismatchCount++
@@ -975,6 +975,11 @@ func normalizeTimestampString(s string) string {
 }
 
 func normalizeString(s string) string {
+	// Normalize line endings: \r\n → \n, then standalone \r → \n.
+	// MySQL/TiDB may strip or normalize carriage returns differently than PG.
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+
 	// Normalize decimal numbers: strip trailing zeros so "10.50" and "10.5"
 	// compare equal. This handles PG (string "10.50") vs TiDB (float64->"10.5").
 	s = normalizeDecimalString(s)
@@ -1113,6 +1118,14 @@ func normalizeJSON(s string) string {
 		buf.WriteRune(r)
 	}
 	return buf.String()
+}
+
+// trimTrailingWhitespace removes trailing whitespace characters (space, tab,
+// newline, carriage return) from a string. This is used for text-type column
+// comparison because MySQL/TiDB may strip trailing whitespace differently than
+// PostgreSQL (e.g., PG preserves \r\n while TiDB strips it).
+func trimTrailingWhitespace(s string) string {
+	return strings.TrimRight(s, " \t\n\r")
 }
 
 func truncate(s string, maxLen int) string {

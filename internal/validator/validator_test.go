@@ -1,6 +1,7 @@
 package validator
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -41,6 +42,55 @@ func TestNormalizeDecimalString(t *testing.T) {
 		result := normalizeDecimalString(tt.input)
 		if result != tt.expected {
 			t.Errorf("normalizeDecimalString(%q) = %q, want %q", tt.input, result, tt.expected)
+		}
+	}
+}
+
+func TestNormalizeString_LineEndings(t *testing.T) {
+	// \r\n should be normalized to \n
+	input := "2024年1月18日公告:\r\n 根据《上海康德莱控股集团有限公"
+	output := normalizeString(input)
+	if strings.Contains(output, "\r") {
+		t.Errorf("normalizeString should remove \\r: got %q", output)
+	}
+	if !strings.Contains(output, "\n") {
+		t.Errorf("normalizeString should preserve \\n: got %q", output)
+	}
+
+	// standalone \r should also be normalized
+	input2 := "text with\r carriage return"
+	output2 := normalizeString(input2)
+	if strings.Contains(output2, "\r") {
+		t.Errorf("normalizeString should remove standalone \\r: got %q", output2)
+	}
+
+	// No \r should be unchanged
+	input3 := "plain text\nwith newlines"
+	output3 := normalizeString(input3)
+	if output3 != input3 {
+		t.Errorf("normalizeString should not change text without \\r: got %q want %q", output3, input3)
+	}
+}
+
+func TestTrimTrailingWhitespace(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"hello   ", "hello"},
+		{"hello\t", "hello"},
+		{"hello\r\n", "hello"},
+		{"hello\n", "hello"},
+		{"hello\r", "hello"},
+		{"hello \t\n\r", "hello"},
+		{"hello", "hello"},
+		{"  hello  ", "  hello"},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		result := trimTrailingWhitespace(tt.input)
+		if result != tt.expected {
+			t.Errorf("trimTrailingWhitespace(%q) = %q, want %q", tt.input, result, tt.expected)
 		}
 	}
 }
