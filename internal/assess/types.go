@@ -151,31 +151,31 @@ type SequenceInfo struct {
 
 // Finding represents a single compatibility assessment result.
 type Finding struct {
-	Dimension   string // assessment dimension
-	ObjectType  string // "column", "index", "view", "function", etc.
-	ObjectName  string // fully qualified name
-	Level       string // compatibility level
-	PGDetail    string // PG-side detail
-	TiDBDetail  string // TiDB-side detail
-	Suggestion  string // migration suggestion
-	AutoFix     bool   // whether this can be auto-fixed
+	Dimension   string `json:"dimension"`
+	ObjectType  string `json:"object_type"`
+	ObjectName  string `json:"object_name"`
+	Level       string `json:"level"`
+	PGDetail    string `json:"pg_detail"`
+	TiDBDetail  string `json:"tidb_detail"`
+	Suggestion  string `json:"suggestion"`
+	AutoFix     bool   `json:"auto_fix"`
 }
 
 // DimensionResult holds the assessment results for one dimension.
 type DimensionResult struct {
-	Dimension string
-	Total     int
-	Score     float64 // 0-100
-	Findings  []Finding
+	Dimension string   `json:"dimension"`
+	Total     int      `json:"total"`
+	Score     float64  `json:"score"`
+	Findings  []Finding `json:"findings"`
 }
 
 // AssessmentReport is the top-level report.
 type AssessmentReport struct {
-	Score          float64            // overall weighted score 0-100
-	Level          string             // overall compatibility level
-	DimensionResults []DimensionResult
-	AllFindings    []Finding
-	Summary        map[string]int     // level -> count
+	Score            float64            `json:"score"`
+	Level            string             `json:"level"`
+	DimensionResults []DimensionResult  `json:"dimension_results"`
+	AllFindings      []Finding          `json:"all_findings"`
+	Summary          map[string]int     `json:"summary"`
 }
 
 // Score calculates the overall score from dimension results.
