@@ -64,6 +64,19 @@ h1 { text-align: center; color: #1a1a2e; margin-bottom: 8px; font-size: 28px; }
 .badge-convertible { background: #fffbe6; color: #d48806; }
 .badge-manual { background: #fff7e6; color: #d46b08; }
 .badge-incompatible { background: #fff1f0; color: #cf1322; }
+/* DDL Modal */
+.ddl-modal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); }
+.ddl-modal.active { display: flex; align-items: center; justify-content: center; }
+.ddl-modal-content { background: #fff; border-radius: 12px; padding: 24px; max-width: 700px; width: 90%; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 8px 24px rgba(0,0,0,0.2); }
+.ddl-modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.ddl-modal-header h3 { margin: 0; font-size: 18px; color: #1a1a2e; }
+.ddl-close { background: none; border: none; font-size: 24px; cursor: pointer; color: #999; }
+.ddl-close:hover { color: #333; }
+.ddl-textarea { width: 100%; min-height: 200px; font-family: "Courier New", monospace; font-size: 13px; padding: 12px; border: 1px solid #d9d9d9; border-radius: 6px; resize: vertical; background: #fafafa; }
+.ddl-copy-btn { margin-top: 12px; padding: 8px 16px; background: #1a1a2e; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.ddl-copy-btn:hover { background: #333; }
+.ddl-btn { padding: 4px 10px; background: #e6f7ff; color: #1890ff; border: 1px solid #91d5ff; border-radius: 4px; cursor: pointer; font-size: 12px; }
+.ddl-btn:hover { background: #bae7ff; }
 .footer { text-align: center; color: #999; font-size: 12px; margin-top: 32px; padding: 16px; }
 </style>
 </head>
@@ -119,7 +132,7 @@ h1 { text-align: center; color: #1a1a2e; margin-bottom: 8px; font-size: 28px; }
   {{if .ProblemRows}}
   <h2 class="section-title">⚠️ 需要处理的项目（{{.ProblemCount}} 项）</h2>
   <table class="problem-table">
-    <thead><tr><th style="width:40px">#</th><th>类型</th><th>对象</th><th>级别</th><th>PG</th><th>TiDB</th><th>建议</th></tr></thead>
+    <thead><tr><th style="width:40px">#</th><th>类型</th><th>对象</th><th>级别</th><th>PG</th><th>TiDB</th><th>建议</th><th style="width:60px">DDL</th></tr></thead>
     <tbody>
     {{range .ProblemRows}}
     <tr>
@@ -130,6 +143,7 @@ h1 { text-align: center; color: #1a1a2e; margin-bottom: 8px; font-size: 28px; }
       <td style="max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{.PGDetail}}">{{.PGDetail}}</td>
       <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="{{.TiDBDetail}}">{{.TiDBDetail}}</td>
       <td style="max-width:250px;">{{.Suggestion}}</td>
+    <td>{{if .DDL}}<button class="ddl-btn" onclick="showDDL(this)" data-ddl="{{.DDLEscaped}}">查看</button>{{end}}</td>
     </tr>
     {{end}}
     </tbody>
@@ -138,6 +152,42 @@ h1 { text-align: center; color: #1a1a2e; margin-bottom: 8px; font-size: 28px; }
 
   <div class="footer">由 pg2tidb 兼容性评估引擎自动生成</div>
 </div>
+
+  <!-- DDL Modal -->
+  <div class="ddl-modal" id="ddlModal">
+    <div class="ddl-modal-content">
+      <div class="ddl-modal-header">
+        <h3>DDL 导出</h3>
+        <button class="ddl-close" onclick="closeDDL()">&times;</button>
+      </div>
+      <textarea class="ddl-textarea" id="ddlText" readonly></textarea>
+      <button class="ddl-copy-btn" onclick="copyDDL()">📋 复制 DDL</button>
+    </div>
+  </div>
+
+<script>
+function showDDL(btn) {
+  var ddl = btn.getAttribute("data-ddl");
+  document.getElementById("ddlText").value = ddl;
+  document.getElementById("ddlModal").classList.add("active");
+}
+function closeDDL() {
+  document.getElementById("ddlModal").classList.remove("active");
+}
+function copyDDL() {
+  var textarea = document.getElementById("ddlText");
+  textarea.select();
+  textarea.setSelectionRange(0, 99999);
+  navigator.clipboard.writeText(textarea.value).then(function() {
+    alert("DDL 已复制到剪贴板");
+  });
+}
+window.onclick = function(event) {
+  if (event.target == document.getElementById("ddlModal")) {
+    closeDDL();
+  }
+}
+</script>
 </body>
 </html>`
 
@@ -167,6 +217,8 @@ type htmlDimRow struct {
 }
 
 type htmlProblemRow struct {
+		DDL        string
+		DDLEscaped string
 	Index      int
 	ObjectType string
 	ObjectName string
@@ -284,6 +336,8 @@ func (rg *ReportGenerator) buildHTMLData() htmlTemplateData {
 			tidbDetail = tidbDetail[:37] + "..."
 		}
 		data.ProblemRows = append(data.ProblemRows, htmlProblemRow{
+			DDL:        f.DDL,
+			DDLEscaped: template.HTMLEscapeString(f.DDL),
 			Index:      i + 1,
 			ObjectType: f.ObjectType,
 			ObjectName: f.ObjectName,

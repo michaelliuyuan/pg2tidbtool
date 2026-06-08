@@ -96,6 +96,7 @@ type IndexInfo struct {
 	Definition string
 	IsPartial  bool // has WHERE clause
 	IsExpression bool // uses expression
+	DDL        string // Full CREATE INDEX DDL
 }
 
 // ViewInfo represents a PG view.
@@ -132,6 +133,7 @@ type EnumInfo struct {
 	Schema  string
 	Name    string
 	Values  []string
+	DDL     string // Full CREATE TYPE AS ENUM DDL
 }
 
 // ExtensionInfo represents a PG extension.
@@ -139,6 +141,7 @@ type ExtensionInfo struct {
 	Name    string
 	Version string
 	Installed bool
+	DDL      string // Full CREATE EXTENSION DDL
 }
 
 // SequenceInfo represents a PG sequence.
@@ -150,6 +153,7 @@ type SequenceInfo struct {
 	Increment  int64
 	MaxValue   int64
 	MinValue   int64
+	DDL        string // Full CREATE SEQUENCE DDL
 }
 
 // Finding represents a single compatibility assessment result.

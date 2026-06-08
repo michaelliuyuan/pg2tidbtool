@@ -170,7 +170,8 @@ func (s *Scanner) scanIndexes(ctx context.Context) ([]IndexInfo, error) {
 			i.indexdef LIKE '%PRIMARY KEY%' OR i.indexname LIKE '%pkey',
 			i.indexdef,
 			CASE WHEN i.indexdef LIKE '%WHERE%' THEN true ELSE false END,
-			CASE WHEN i.indexdef ~ '\([^)]*\)' AND i.indexdef NOT LIKE '%USING %(%.%)' THEN true ELSE false END
+			CASE WHEN i.indexdef ~ '\([^)]*\)' AND i.indexdef NOT LIKE '%USING %(%.%)' THEN true ELSE false END,
+		i.indexdef || ';' AS ddl
 		FROM pg_indexes i
 		WHERE i.schemaname = $1
 		ORDER BY i.tablename, i.indexname
@@ -185,7 +186,7 @@ func (s *Scanner) scanIndexes(ctx context.Context) ([]IndexInfo, error) {
 		var idx IndexInfo
 		if err := rows.Scan(&idx.TableName, &idx.Name, &idx.IndexType,
 			&idx.IsUnique, &idx.IsPrimary, &idx.Definition,
-			&idx.IsPartial, &idx.IsExpression); err != nil {
+			&idx.IsPartial, &idx.IsExpression, &idx.DDL); err != nil {
 			return nil, err
 		}
 		indexes = append(indexes, idx)
