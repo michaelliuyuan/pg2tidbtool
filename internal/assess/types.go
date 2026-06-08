@@ -103,6 +103,7 @@ type ViewInfo struct {
 	Schema     string
 	Name       string
 	Definition string
+	DDL        string // Full CREATE VIEW DDL
 }
 
 // FunctionInfo represents a PG function/procedure.
@@ -113,6 +114,7 @@ type FunctionInfo struct {
 	Language    string
 	Source      string
 	IsProcedure bool
+	DDL         string // Full CREATE FUNCTION/PROCEDURE DDL
 }
 
 // TriggerInfo represents a PG trigger.
@@ -122,6 +124,7 @@ type TriggerInfo struct {
 	EventType     string // INSERT, UPDATE, DELETE, TRUNCATE
 	Timing        string // BEFORE, AFTER, INSTEAD OF
 	Statement     string
+	DDL           string // Full CREATE TRIGGER DDL
 }
 
 // EnumInfo represents a PG enum type.
@@ -159,6 +162,8 @@ type Finding struct {
 	TiDBDetail  string `json:"tidb_detail"`
 	Suggestion  string `json:"suggestion"`
 	AutoFix     bool   `json:"auto_fix"`
+	DDL         string `json:"ddl,omitempty"`         // Original DDL from PG
+	TiDBDDL     string `json:"tidb_ddl,omitempty"`    // Suggested TiDB-compatible DDL
 }
 
 // DimensionResult holds the assessment results for one dimension.

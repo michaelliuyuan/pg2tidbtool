@@ -474,6 +474,11 @@ func (a *Assessor) checkViews(result *ScanResult) DimensionResult {
 			}
 		}
 
+		viewDDL := view.DDL
+		if viewDDL == "" {
+			viewDDL = "CREATE VIEW " + view.Name + " AS " + view.Definition
+		}
+
 		switch {
 		case issues == 0:
 			s.add(Finding{
@@ -481,7 +486,8 @@ func (a *Assessor) checkViews(result *ScanResult) DimensionResult {
 				ObjectName: objName,
 				Level: LevelCompatible,
 				PGDetail: "简单视图", TiDBDetail: "兼容",
-				Suggestion: "", AutoFix: true,
+				Suggestion: "" , AutoFix: true,
+				DDL: viewDDL,
 			})
 		case issues <= 2:
 			s.add(Finding{
@@ -523,6 +529,7 @@ func (a *Assessor) checkFunctions(result *ScanResult) DimensionResult {
 			TiDBDetail: "需改写为 MySQL 兼容语法",
 			Suggestion: fmt.Sprintf("函数 %s 需改写为 TiDB 兼容的 MySQL 语法", fn.Name),
 			AutoFix: false,
+			DDL: fn.DDL,
 		})
 	}
 
@@ -547,6 +554,7 @@ func (a *Assessor) checkTriggers(result *ScanResult) DimensionResult {
 			TiDBDetail: "需改写为 MySQL 兼容语法",
 			Suggestion: "触发器需改写为 TiDB 兼容的 MySQL 触发器语法",
 			AutoFix: false,
+			DDL: trig.DDL,
 		})
 	}
 

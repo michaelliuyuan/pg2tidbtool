@@ -11,6 +11,8 @@ interface Finding {
   tidb_detail: string
   suggestion: string
   auto_fix: boolean
+  ddl?: string
+  tidb_ddl?: string
 }
 
 interface DimResult {
@@ -31,6 +33,9 @@ interface AssessReport {
 const loading = ref(false)
 const report = ref<AssessReport | null>(null)
 const htmlReportUrl = ref('')
+const ddlDialogVisible = ref(false)
+const ddlDialogTitle = ref('')
+const ddlDialogContent = ref('')
 
 const STORAGE_KEY = 'pg2tidb-assess-source'
 
@@ -163,6 +168,27 @@ async function downloadHTML() {
     loading.value = false
   }
 }
+
+function showDDL(finding: Finding) {
+  ddlDialogTitle.value = finding.object_name + ' — DDL'
+  const parts: string[] = []
+  if (finding.ddl) {
+    parts.push('-- PG DDL')
+    parts.push(finding.ddl)
+  }
+  if (finding.tidb_ddl) {
+    parts.push('')
+    parts.push('-- TiDB 建议DDL')
+    parts.push(finding.tidb_ddl)
+  }
+  ddlDialogContent.value = parts.length > 0 ? parts.join('\n') : '暂无 DDL'
+  ddlDialogVisible.value = true
+}
+
+function copyDDL() {
+  navigator.clipboard.writeText(ddlDialogContent.value)
+  ElMessage.success('已复制到剪贴板')
+}
 </script>
 
 <template>
@@ -285,8 +311,23 @@ async function downloadHTML() {
           <el-table-column prop="pg_detail" label="PG" width="140" show-overflow-tooltip />
           <el-table-column prop="tidb_detail" label="TiDB" width="120" show-overflow-tooltip />
           <el-table-column prop="suggestion" label="建议" min-width="250" show-overflow-tooltip />
+          <el-table-column label="DDL" width="80" align="center">
+            <template #default="{ row }">
+              <el-button v-if="row.ddl" link type="primary" size="small" @click="showDDL(row)">查看</el-button>
+              <span v-else style="color: #ccc;">-</span>
+            </template>
+          </el-table-column>
         </el-table>
       </el-card>
     </template>
+
+    <!-- DDL Dialog -->
+    <el-dialog v-model="ddlDialogVisible" :title="ddlDialogTitle" width="700px">
+      <el-input type="textarea" :model-value="ddlDialogContent" :rows="18" readonly style="font-family: monospace;" />
+      <template #footer>
+        <el-button @click="copyDDL">📋 复制</el-button>
+        <el-button @click="ddlDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>

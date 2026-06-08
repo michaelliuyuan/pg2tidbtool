@@ -195,10 +195,16 @@ func (s *Scanner) scanIndexes(ctx context.Context) ([]IndexInfo, error) {
 
 func (s *Scanner) scanViews(ctx context.Context) ([]ViewInfo, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT table_schema, table_name, view_definition
-		FROM information_schema.views
-		WHERE table_schema = $1
-		ORDER BY table_name
+		SELECT
+			v.table_schema,
+			v.table_name,
+			v.view_definition,
+			COALESCE(pg_get_viewdef(c.oid, true), '')
+		FROM information_schema.views v
+		JOIN pg_class c ON c.relname = v.table_name
+		JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = v.table_schema
+		WHERE v.table_schema = $1
+		ORDER BY v.table_name
 	`, s.schema)
 	if err != nil {
 		return nil, err
@@ -208,7 +214,7 @@ func (s *Scanner) scanViews(ctx context.Context) ([]ViewInfo, error) {
 	var views []ViewInfo
 	for rows.Next() {
 		var v ViewInfo
-		if err := rows.Scan(&v.Schema, &v.Name, &v.Definition); err != nil {
+		if err := rows.Scan(&v.Schema, &v.Name, &v.Definition, &v.DDL); err != nil {
 			return nil, err
 		}
 		v.Definition = strings.TrimSpace(v.Definition)
@@ -227,7 +233,8 @@ func (s *Scanner) scanFunctions(ctx context.Context) ([]FunctionInfo, error) {
 				  WHEN l.lanname = 'sql' THEN 'sql'
 				  ELSE l.lanname::text END,
 			p.prosrc,
-			p.prokind = 'p'
+			p.prokind = 'p',
+			COALESCE(pg_get_functiondef(p.oid), '')
 		FROM pg_proc p
 		JOIN pg_namespace n ON p.pronamespace = n.oid
 		JOIN pg_language l ON p.prolang = l.oid
@@ -244,7 +251,7 @@ func (s *Scanner) scanFunctions(ctx context.Context) ([]FunctionInfo, error) {
 	for rows.Next() {
 		var f FunctionInfo
 		if err := rows.Scan(&f.Schema, &f.Name, &f.ReturnType,
-			&f.Language, &f.Source, &f.IsProcedure); err != nil {
+			&f.Language, &f.Source, &f.IsProcedure, &f.DDL); err != nil {
 			return nil, err
 		}
 		functions = append(functions, f)
@@ -271,7 +278,8 @@ func (s *Scanner) scanTriggers(ctx context.Context) ([]TriggerInfo, error) {
 				  WHEN t.tgtype & 64 = 64 THEN 'INSTEAD OF'
 				  ELSE 'AFTER'
 			END,
-			p.prosrc
+			p.prosrc,
+			pg_get_triggerdef(t.oid)
 		FROM pg_trigger t
 		JOIN pg_class c ON t.tgrelid = c.oid
 		JOIN pg_proc p ON t.tgfoid = p.oid
@@ -289,7 +297,7 @@ func (s *Scanner) scanTriggers(ctx context.Context) ([]TriggerInfo, error) {
 	for rows.Next() {
 		var t TriggerInfo
 		if err := rows.Scan(&t.TableName, &t.Name, &t.EventType,
-			&t.Timing, &t.Statement); err != nil {
+			&t.Timing, &t.Statement, &t.DDL); err != nil {
 			return nil, err
 		}
 		triggers = append(triggers, t)
