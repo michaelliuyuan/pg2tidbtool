@@ -368,7 +368,7 @@ func (a *Applier) Stats() ApplierStats {
 
 // tableKey returns the canonical table identifier.
 func tableKey(schema, table string) string {
-	if schema == "" || schema == "public" {
+	if schema == "" {
 		return table
 	}
 	return schema + "." + table

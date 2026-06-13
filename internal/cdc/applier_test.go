@@ -111,7 +111,7 @@ func TestTableKey(t *testing.T) {
 	tests := []struct {
 		schema, table, expected string
 	}{
-		{"public", "users", "users"},
+		{"public", "users", "public.users"},
 		{"", "users", "users"},
 		{"myschema", "users", "myschema.users"},
 	}
