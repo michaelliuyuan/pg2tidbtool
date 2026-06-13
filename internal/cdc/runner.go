@@ -16,8 +16,9 @@ import (
 
 // Runner orchestrates the complete CDC pipeline: source → transform → apply.
 type Runner struct {
-	srcCfg   SourceConfig
-	batchCfg BatchConfig
+	srcCfg    SourceConfig
+	batchCfg  BatchConfig
+	targetDSN string
 
 	source      *Source
 	applier     *Applier
@@ -58,9 +59,10 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}
 
 	r := &Runner{
-		srcCfg:   cfg.Source,
-		batchCfg: cfg.Batch,
-		log:      log,
+		srcCfg:    cfg.Source,
+		batchCfg:  cfg.Batch,
+		targetDSN: cfg.TargetDSN,
+		log:       log,
 	}
 
 	// Create components
@@ -112,7 +114,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	// Connect to TiDB target
-	targetDB, err := sql.Open("mysql", r.batchCfg.TargetDSN())
+	targetDB, err := sql.Open("mysql", r.targetDSN)
 	if err != nil {
 		return fmt.Errorf("cdc runner: connect to target: %w", err)
 	}
@@ -219,9 +221,4 @@ func (r *Runner) Stats() map[string]interface{} {
 	}
 
 	return stats
-}
-
-// TargetDSN returns the TiDB DSN. Helper for config wiring.
-func (b BatchConfig) TargetDSN() string {
-	return "" // filled by RunnerConfig
 }
