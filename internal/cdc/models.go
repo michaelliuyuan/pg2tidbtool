@@ -35,10 +35,11 @@ type CDCEvent struct {
 
 // ColumnValue is a single column name/value pair in a CDC event.
 type ColumnValue struct {
-	Name  string      `json:"name"`
-	Value interface{} `json:"value"`
-	Type  string      `json:"type"`             // PG data type OID string
-	IsKey bool        `json:"is_key,omitempty"` // part of the relation PK / replica identity (from RelationMessage KeyColumn flag)
+	Name      string      `json:"name"`
+	Value     interface{} `json:"value"`
+	Type      string      `json:"type"`              // PG data type OID string
+	IsKey     bool        `json:"is_key,omitempty"`  // part of the relation PK / replica identity (from RelationMessage KeyColumn flag)
+	Unchanged bool        `json:"unchanged,omitempty"` // pgoutput 'u': unchanged TOASTed value, not sent — must never be rendered as a literal
 }
 
 // Checkpoint records the last successfully processed LSN.

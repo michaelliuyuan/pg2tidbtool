@@ -67,13 +67,21 @@ func (t *Transformer) transformInsert(event *CDCEvent) (string, error) {
 func (t *Transformer) transformUpdate(event *CDCEvent) (string, error) {
 	tableName := t.quotedTable(event.Schema, event.Table)
 
+	// SET only changed columns. Unchanged TOAST ('u') columns carry no value and
+	// must be dropped — rendering them as '' / NULL would corrupt the row.
 	setClauses := make([]string, 0, len(event.Columns))
 	for _, col := range event.Columns {
+		if col.Unchanged {
+			continue
+		}
 		setClauses = append(setClauses,
 			fmt.Sprintf("%s = %s", quoteMySQLIdent(col.Name), t.formatValue(col)))
 	}
+	if len(setClauses) == 0 {
+		return "", fmt.Errorf("cdc transformer: UPDATE with no settable columns for %s (all unchanged/missing)", tableName)
+	}
 
-	// Build WHERE from old columns (primary key / all old values)
+	// Build WHERE from the PK
 	whereClauses := t.buildWhere(event)
 	if len(whereClauses) == 0 {
 		return "", fmt.Errorf("cdc transformer: UPDATE without key columns for %s", tableName)
@@ -132,6 +140,9 @@ func (t *Transformer) buildWhere(event *CDCEvent) []string {
 
 	var clauses []string
 	for _, col := range keys {
+		if col.Unchanged {
+			continue // 'u': no value present, cannot anchor a WHERE predicate
+		}
 		if col.Value == nil {
 			clauses = append(clauses,
 				fmt.Sprintf("%s IS NULL", quoteMySQLIdent(col.Name)))

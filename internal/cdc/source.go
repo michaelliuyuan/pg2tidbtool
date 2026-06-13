@@ -473,17 +473,28 @@ func decodeTupleColumns(rel *Relation, tuple *pglogrepl.TupleData, isKeyTuple bo
 }
 
 // decodeColumnValue builds a ColumnValue from a single tuple column, carrying
-// the relation column's name/type/IsKey and rendering NULL ('n') as nil.
+// the relation column's name/type/IsKey. NULL ('n') -> nil (first-class NULL);
+// unchanged TOAST ('u') -> Unchanged=true with no value (must never render as a
+// literal); 't'/'b' -> text representation.
 func decodeColumnValue(rc RelationColumn, c *pglogrepl.TupleDataColumn) ColumnValue {
 	cv := ColumnValue{
 		Name:  rc.Name,
 		Type:  rc.TypeName,
 		IsKey: rc.IsKey,
 	}
-	if c != nil && c.DataType == pglogrepl.TupleDataTypeNull {
+	if c == nil {
+		return cv
+	}
+	switch c.DataType {
+	case pglogrepl.TupleDataTypeNull:
+		cv.Value = nil // explicit NULL
+	case pglogrepl.TupleDataTypeToast:
+		// 'u': unchanged TOASTed value — PG did not send it. Mark Unchanged so the
+		// transformer drops it from SET/WHERE instead of rendering '' or NULL
+		// (which would wrongly overwrite/skip the column). See #t48 Bug 'u'.
+		cv.Unchanged = true
 		cv.Value = nil
-	} else {
-		// 't' text / 'b' binary -> text representation; 'u' unchanged -> no value.
+	default: // 't' text / 'b' binary
 		cv.Value = string(c.Data)
 	}
 	return cv

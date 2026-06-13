@@ -296,6 +296,69 @@ func TestNullInsertRoundTrip(t *testing.T) {
 	}
 }
 
+// TestUpdateUnchangedTOAST guards the 'u' (unchanged TOAST) fix: an UPDATE
+// whose new image marks a column 'u' (value not sent) must DROP that column
+// from SET, never render it as ''/NULL (which would clobber an unchanged value).
+func TestUpdateUnchangedTOAST(t *testing.T) {
+	tr := NewTransformer(DefaultTransformerConfig())
+
+	event := &CDCEvent{
+		Kind:   EventUpdate,
+		Schema: "public",
+		Table:  "users",
+		Columns: []ColumnValue{
+			{Name: "id", Value: "1", Type: "oid_23", IsKey: true},
+			{Name: "name", Value: "Bob", Type: "oid_25"},
+			{Name: "bio", Type: "oid_25", Unchanged: true}, // 'u' — no value
+		},
+	}
+
+	sql, err := tr.TransformEvent(event)
+	if err != nil {
+		t.Fatalf("TransformEvent(unchanged toast): %v", err)
+	}
+
+	// `bio` must not appear; SET only id + name.
+	want := "UPDATE `users` SET `id` = '1', `name` = 'Bob' WHERE `id` = '1'"
+	if sql != want {
+		t.Errorf("got:\n  %s\nwant:\n  %s", sql, want)
+	}
+}
+
+// TestDecodeUnchangedTOAST guards the source mapping: a pgoutput 'u' column
+// decodes to Unchanged=true (Value nil), while normal text columns do not.
+func TestDecodeUnchangedTOAST(t *testing.T) {
+	rel := &Relation{
+		Schema: "public", Name: "t",
+		Columns: []RelationColumn{
+			{Name: "id", TypeName: "oid_23", IsKey: true},
+			{Name: "name", TypeName: "oid_25"},
+			{Name: "bio", TypeName: "oid_25"},
+		},
+	}
+	tuple := &pglogrepl.TupleData{
+		Columns: []*pglogrepl.TupleDataColumn{
+			{DataType: pglogrepl.TupleDataTypeText, Data: []byte("1")},
+			{DataType: pglogrepl.TupleDataTypeText, Data: []byte("Bob")},
+			{DataType: pglogrepl.TupleDataTypeToast}, // 'u' unchanged
+		},
+	}
+
+	cols := decodeTupleColumns(rel, tuple, false)
+	if len(cols) != 3 {
+		t.Fatalf("expected 3 columns, got %d", len(cols))
+	}
+	if cols[1].Unchanged {
+		t.Errorf("name Unchanged = true, want false")
+	}
+	if !cols[2].Unchanged {
+		t.Errorf("bio Unchanged = false, want true for pgoutput 'u'")
+	}
+	if cols[2].Value != nil {
+		t.Errorf("bio Value = %v, want nil for unchanged column", cols[2].Value)
+	}
+}
+
 func TestTransformer_NullValue(t *testing.T) {
 	tr := NewTransformer(DefaultTransformerConfig())
 
