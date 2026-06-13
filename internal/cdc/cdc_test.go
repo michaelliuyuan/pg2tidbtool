@@ -247,6 +247,55 @@ func TestTransformer_Truncate(t *testing.T) {
 	}
 }
 
+// TestNullInsertRoundTrip exercises the full source-mapping -> transformer path
+// for an INSERT with a NULL column, the exact shape of #t48 Bug#7. Proves the
+// NULL column is preserved (not omitted) and rendered as SQL NULL, so the row
+// is representable. If this passes, the row-drop is NOT in this code path.
+func TestNullInsertRoundTrip(t *testing.T) {
+	rel := &Relation{
+		Schema: "public",
+		Name:   "single_pk",
+		Columns: []RelationColumn{
+			{Name: "id", TypeName: "oid_23", IsKey: true},
+			{Name: "name", TypeName: "oid_25", IsKey: false},
+		},
+	}
+	// pgoutput 'N' image for: insert into single_pk values (9901, NULL)
+	tuple := &pglogrepl.TupleData{
+		Columns: []*pglogrepl.TupleDataColumn{
+			{DataType: pglogrepl.TupleDataTypeText, Data: []byte("9901")},
+			{DataType: pglogrepl.TupleDataTypeNull}, // name = NULL
+		},
+	}
+
+	cols := decodeTupleColumns(rel, tuple, false)
+	if len(cols) != 2 {
+		t.Fatalf("expected 2 columns preserved, got %d (NULL column must not be dropped)", len(cols))
+	}
+	if cols[0].Name != "id" || cols[0].Value != "9901" {
+		t.Errorf("cols[0] = %+v, want id='9901'", cols[0])
+	}
+	if cols[1].Name != "name" || cols[1].Value != nil {
+		t.Errorf("cols[1] = %+v, want name Value=nil", cols[1])
+	}
+
+	tr := NewTransformer(DefaultTransformerConfig())
+	sql, err := tr.TransformEvent(&CDCEvent{
+		Kind:    EventInsert,
+		Schema:  "public",
+		Table:   "single_pk",
+		Columns: cols,
+	})
+	if err != nil {
+		t.Fatalf("TransformEvent(null insert): %v", err)
+	}
+
+	want := "REPLACE INTO `single_pk` (`id`, `name`) VALUES ('9901', NULL)"
+	if sql != want {
+		t.Errorf("NULL insert SQL:\n  got:  %s\n  want: %s", sql, want)
+	}
+}
+
 func TestTransformer_NullValue(t *testing.T) {
 	tr := NewTransformer(DefaultTransformerConfig())
 
