@@ -7,6 +7,17 @@ import (
 	"go.uber.org/zap"
 )
 
+// StructuralError indicates a permanent, non-transient failure to transform an
+// event — e.g. a table without a usable replica identity (no PK / REPLICA
+// IDENTITY NOTHING) cannot be safely UPDATEd/DELETEd, so no valid WHERE can be
+// built. Unlike transient apply errors (TiDB temporarily unwritable, deadlock,
+// …), these must HALT the pipeline rather than be retried or silently
+// accumulated as EventsFailed (the silent-divergence antipattern). The applier
+// detects this via errors.As and stops. See #t48 step 2 Part B.
+type StructuralError struct{ Msg string }
+
+func (e *StructuralError) Error() string { return e.Msg }
+
 // Transformer converts raw PG logical replication events into TiDB-compatible
 // SQL statements. It handles type mapping, quoting, and SQL generation.
 type Transformer struct {
@@ -78,13 +89,13 @@ func (t *Transformer) transformUpdate(event *CDCEvent) (string, error) {
 			fmt.Sprintf("%s = %s", quoteMySQLIdent(col.Name), t.formatValue(col)))
 	}
 	if len(setClauses) == 0 {
-		return "", fmt.Errorf("cdc transformer: UPDATE with no settable columns for %s (all unchanged/missing)", tableName)
+		return "", &StructuralError{Msg: fmt.Sprintf("cdc transformer: UPDATE with no settable columns for %s (all unchanged/missing)", tableName)}
 	}
 
 	// Build WHERE from the PK
 	whereClauses := t.buildWhere(event)
 	if len(whereClauses) == 0 {
-		return "", fmt.Errorf("cdc transformer: UPDATE without key columns for %s", tableName)
+		return "", &StructuralError{Msg: fmt.Sprintf("cdc transformer: UPDATE without key columns for %s (table has no usable replica identity)", tableName)}
 	}
 
 	sql := fmt.Sprintf("UPDATE %s SET %s WHERE %s",
@@ -100,7 +111,7 @@ func (t *Transformer) transformDelete(event *CDCEvent) (string, error) {
 
 	whereClauses := t.buildWhere(event)
 	if len(whereClauses) == 0 {
-		return "", fmt.Errorf("cdc transformer: DELETE without key columns for %s", tableName)
+		return "", &StructuralError{Msg: fmt.Sprintf("cdc transformer: DELETE without key columns for %s (table has no usable replica identity)", tableName)}
 	}
 
 	sql := fmt.Sprintf("DELETE FROM %s WHERE %s",

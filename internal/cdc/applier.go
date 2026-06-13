@@ -3,6 +3,7 @@ package cdc
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -108,6 +109,9 @@ type Applier struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	fatalMu  sync.Mutex
+	fatalErr error // set when the applier halts on a structural failure; see Fatal()
 }
 
 // tableBuffer accumulates events for a single table, maintaining insert order.
@@ -196,6 +200,9 @@ func (a *Applier) Start(ctx context.Context, events <-chan *CDCEvent) error {
 			a.flushAllTo(workerChs)
 			closeWorkers()
 			a.wg.Wait()
+			if fe := a.Fatal(); fe != nil {
+				return fe // a structural halt surfaces as a real error, not ctx.Canceled
+			}
 			return a.ctx.Err()
 
 		case event, ok := <-events:
@@ -294,6 +301,17 @@ func (a *Applier) worker(ctx context.Context, workCh <-chan *CDCEvent, id int) {
 
 	for event := range workCh {
 		if err := a.applyEvent(ctx, event); err != nil {
+			var se *StructuralError
+			if errors.As(err, &se) {
+				// Permanent failure (e.g. a table with no usable replica identity):
+				// halt the pipeline loudly instead of silently accumulating
+				// EventsFailed and diverging. See #t48 step 2 Part B.
+				a.setFatal(err)
+				if a.cancel != nil {
+					a.cancel() // triggers the dispatch loop's ctx.Done shutdown
+				}
+				return
+			}
 			a.log.Error("apply event failed",
 				zap.Int("worker", id),
 				zap.String("table", tableKey(event.Schema, event.Table)),
@@ -387,6 +405,26 @@ func (a *Applier) applyConflictStrategy(sql string, kind EventKind) string {
 		}
 	}
 	return sql
+}
+
+// setFatal records a structural failure that halted the applier (e.g. a table
+// with no usable replica identity) and is sticky. Used so a permanent failure
+// halts loudly instead of accumulating EventsFailed and silently diverging.
+// See #t48 step 2 Part B.
+func (a *Applier) setFatal(err error) {
+	a.fatalMu.Lock()
+	if a.fatalErr == nil {
+		a.fatalErr = err
+	}
+	a.fatalMu.Unlock()
+	a.log.Error("cdc applier halted on structural failure (data-integrity halt)", zap.Error(err))
+}
+
+// Fatal returns the structural failure that halted the applier, or nil.
+func (a *Applier) Fatal() error {
+	a.fatalMu.Lock()
+	defer a.fatalMu.Unlock()
+	return a.fatalErr
 }
 
 // Stats returns the current apply statistics.

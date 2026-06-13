@@ -2,6 +2,7 @@ package cdc
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -392,6 +393,39 @@ func TestSource_FatalErr(t *testing.T) {
 	s.setFatal(fmt.Errorf("second"))
 	if err := s.Err(); err.Error() != "boom" {
 		t.Errorf("Err() = %v, want sticky \"boom\"", err)
+	}
+}
+
+// TestStructuralError_NoPKTable guards #t48 step 2 Part B: an UPDATE/DELETE on a
+// table with no usable replica identity (no IsKey column) must return a
+// StructuralError — the applier halts on these instead of silently accumulating
+// EventsFailed.
+func TestStructuralError_NoPKTable(t *testing.T) {
+	tr := NewTransformer(DefaultTransformerConfig())
+
+	upd := &CDCEvent{
+		Kind: EventUpdate, Schema: "public", Table: "heap",
+		Columns: []ColumnValue{{Name: "name", Value: "x"}}, // no IsKey
+	}
+	_, err := tr.TransformEvent(upd)
+	if err == nil {
+		t.Fatal("expected error for UPDATE on a table without PK")
+	}
+	var se *StructuralError
+	if !errors.As(err, &se) {
+		t.Errorf("UPDATE no-PK: expected *StructuralError, got %T: %v", err, err)
+	}
+
+	del := &CDCEvent{
+		Kind: EventDelete, Schema: "public", Table: "heap",
+		Columns: []ColumnValue{{Name: "name", Value: "x"}}, // no IsKey
+	}
+	_, err = tr.TransformEvent(del)
+	if err == nil {
+		t.Fatal("expected error for DELETE on a table without PK")
+	}
+	if !errors.As(err, &se) {
+		t.Errorf("DELETE no-PK: expected *StructuralError, got %T: %v", err, err)
 	}
 }
 
