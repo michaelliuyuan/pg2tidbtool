@@ -166,16 +166,14 @@ func (s *Source) Start(ctx context.Context, startLSN pglogrepl.LSN) (<-chan *CDC
 		slotLSN = sysIdent.XLogPos
 	}
 	_, err = pglogrepl.CreateReplicationSlot(ctx, conn, s.cfg.SlotName, s.cfg.OutputPlugin,
-		pglogrepl.CreateReplicationSlotOptions{
-			SnapshotAction: "EXPORT_SNAPSHOT",
-		})
+		pglogrepl.CreateReplicationSlotOptions{})
 	if err != nil {
 		s.log.Debug("create replication slot (may already exist)", zap.Error(err))
 	}
 
 	// Start replication
 	pluginArgs := []string{
-		"proto_version", "1",
+		"proto_version", "2",
 		"publication_names", s.cfg.Publication,
 	}
 	err = pglogrepl.StartReplication(ctx, conn, s.cfg.SlotName, slotLSN,
