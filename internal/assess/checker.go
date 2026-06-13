@@ -375,7 +375,7 @@ func (a *Assessor) checkIndexes(result *ScanResult) DimensionResult {
 			s.add(Finding{
 				Dimension: DimIndex, ObjectType: "index",
 				ObjectName: objName,
-				Level: LevelManualNeeded,
+				Level: LevelConvertible,
 				PGDetail: "HASH", TiDBDetail: "不支持",
 				Suggestion: "HASH 索引 TiDB 不支持，建议改用 B-tree", AutoFix: false,
 				DDL: idx.DDL,
@@ -384,7 +384,7 @@ func (a *Assessor) checkIndexes(result *ScanResult) DimensionResult {
 			s.add(Finding{
 				Dimension: DimIndex, ObjectType: "index",
 				ObjectName: objName,
-				Level: LevelIncompatible,
+				Level: LevelConvertible,
 				PGDetail: "GIN", TiDBDetail: "不支持",
 				Suggestion: "GIN 索引不支持，JSON 查询需改用 TiDB JSON 函数", AutoFix: false,
 				DDL: idx.DDL,
@@ -393,7 +393,7 @@ func (a *Assessor) checkIndexes(result *ScanResult) DimensionResult {
 			s.add(Finding{
 				Dimension: DimIndex, ObjectType: "index",
 				ObjectName: objName,
-				Level: LevelIncompatible,
+				Level: LevelConvertible,
 				PGDetail: "GiST", TiDBDetail: "不支持",
 				Suggestion: "GiST 索引不支持，几何/全文索引需替代方案", AutoFix: false,
 				DDL: idx.DDL,
@@ -402,7 +402,7 @@ func (a *Assessor) checkIndexes(result *ScanResult) DimensionResult {
 			s.add(Finding{
 				Dimension: DimIndex, ObjectType: "index",
 				ObjectName: objName,
-				Level: LevelIncompatible,
+				Level: LevelConvertible,
 				PGDetail: "BRIN", TiDBDetail: "不支持",
 				Suggestion: "BRIN 索引不支持，建议使用分区表替代", AutoFix: false,
 				DDL: idx.DDL,
@@ -411,7 +411,7 @@ func (a *Assessor) checkIndexes(result *ScanResult) DimensionResult {
 			s.add(Finding{
 				Dimension: DimIndex, ObjectType: "index",
 				ObjectName: objName,
-				Level: LevelIncompatible,
+				Level: LevelConvertible,
 				PGDetail: "SP-GiST", TiDBDetail: "不支持",
 				Suggestion: "SP-GiST 索引不支持", AutoFix: false,
 				DDL: idx.DDL,
@@ -420,7 +420,7 @@ func (a *Assessor) checkIndexes(result *ScanResult) DimensionResult {
 			s.add(Finding{
 				Dimension: DimIndex, ObjectType: "index",
 				ObjectName: objName,
-				Level: LevelManualNeeded,
+				Level: LevelConvertible,
 				PGDetail: idxType, TiDBDetail: "需评估",
 				Suggestion: fmt.Sprintf("索引类型 %s 需手动评估", idxType), AutoFix: false,
 				DDL: idx.DDL,
@@ -431,7 +431,7 @@ func (a *Assessor) checkIndexes(result *ScanResult) DimensionResult {
 			s.add(Finding{
 				Dimension: DimIndex, ObjectType: "index",
 				ObjectName: fmt.Sprintf("%s (部分索引)", objName),
-				Level: LevelIncompatible,
+				Level: LevelConvertible,
 				PGDetail: "部分索引 (WHERE 子句)", TiDBDetail: "不支持",
 				Suggestion: "部分索引不支持，考虑使用分区表或覆盖索引替代", AutoFix: false,
 			DDL: idx.DDL,
@@ -442,7 +442,7 @@ func (a *Assessor) checkIndexes(result *ScanResult) DimensionResult {
 			s.add(Finding{
 				Dimension: DimIndex, ObjectType: "index",
 				ObjectName: fmt.Sprintf("%s (表达式索引)", objName),
-				Level: LevelManualNeeded,
+				Level: LevelConvertible,
 				PGDetail: "表达式索引", TiDBDetail: "不支持",
 				Suggestion: "表达式索引不支持，需用生成列+索引替代", AutoFix: false,
 			DDL: idx.DDL,
