@@ -154,7 +154,7 @@ func init() {
 	cdcCmd.Flags().String("publication", "pg2tidb_pub", "publication name")
 	cdcCmd.Flags().String("checkpoint-file", ".cdc_checkpoint.json", "LSN checkpoint file path")
 	cdcCmd.Flags().Int("batch-size", 1000, "max events per apply batch")
-	cdcCmd.Flags().Int("parallel", 4, "number of parallel apply workers")
+	cdcCmd.Flags().Int("parallel", 1, "parallel apply workers (default 1=serial, correctness-first; >1 routes per-table but does NOT guarantee cross-table FK order / multi-table txn atomicity — see #t48 Bug#8)")
 	cdcCmd.Flags().String("conflict-strategy", "replace", "conflict resolution: replace, insert_ignore, upsert, skip")
 
 	// Table filter flags

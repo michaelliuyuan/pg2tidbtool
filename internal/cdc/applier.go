@@ -34,8 +34,16 @@ type BatchConfig struct {
 	// FlushInterval is the maximum time between forced flushes.
 	FlushInterval time.Duration `json:"flush_interval"`
 
-	// Parallel is the number of concurrent table-level appliers.
-	// Each table gets its own applier goroutine to maintain ordering per table.
+	// Parallel is the number of concurrent applier workers. Events are routed to
+	// a fixed worker by table hash, so each table is applied serially by one
+	// worker (WAL order preserved within a table) while different tables run in
+	// parallel.
+	//
+	// Default is 1 (fully serial = correctness-first): a shared-channel design
+	// reorders same-row events and silently loses updates (#t48 Bug#8). Opt into
+	// >1 only when you accept the parallel-mode boundaries: cross-table FK apply
+	// order and multi-table source-transaction atomicity are NOT guaranteed
+	// (events are applied individually, not grouped by source transaction).
 	Parallel int `json:"parallel"`
 
 	// MaxRetries is the maximum number of retries for transient failures.
@@ -56,7 +64,7 @@ func DefaultBatchConfig() BatchConfig {
 	return BatchConfig{
 		BatchSize:        1000,
 		FlushInterval:    5 * time.Second,
-		Parallel:         4,
+		Parallel:         1, // serial by default — correctness-first (see Parallel doc); opt into >1 explicitly.
 		MaxRetries:       3,
 		RetryBackoff:     100 * time.Millisecond,
 		ConflictStrategy: ConflictReplace,
@@ -158,41 +166,57 @@ func (a *Applier) Start(ctx context.Context, events <-chan *CDCEvent) error {
 	flushTicker := time.NewTicker(a.cfg.FlushInterval)
 	defer flushTicker.Stop()
 
-	// Start parallel table appliers
-	workCh := make(chan *CDCEvent, a.cfg.BatchSize*2)
-	for i := 0; i < a.cfg.Parallel; i++ {
+	// Per-worker channels: each table is routed by hash to a FIXED worker, so all
+	// events for a table are applied serially by one worker (preserving WAL order
+	// within the table) while different tables apply in parallel. A shared channel
+	// + N workers would reorder same-row events and silently lose updates
+	// (#t48 Bug#8). Default Parallel=1 is fully serial.
+	n := a.cfg.Parallel
+	if n < 1 {
+		n = 1
+	}
+	workerChs := make([]chan *CDCEvent, n)
+	for i := range workerChs {
+		workerChs[i] = make(chan *CDCEvent, a.cfg.BatchSize)
+	}
+	for i := 0; i < n; i++ {
 		a.wg.Add(1)
-		go a.worker(a.ctx, workCh, i)
+		go a.worker(a.ctx, workerChs[i], i)
+	}
+	closeWorkers := func() {
+		for _, ch := range workerChs {
+			close(ch)
+		}
 	}
 
 	// Main dispatch loop
 	for {
 		select {
 		case <-a.ctx.Done():
-			a.flushAllTo(workCh)
-			close(workCh)
+			a.flushAllTo(workerChs)
+			closeWorkers()
 			a.wg.Wait()
 			return a.ctx.Err()
 
 		case event, ok := <-events:
 			if !ok {
 				// Input channel closed — flush remaining and exit
-				a.flushAllTo(workCh)
-				close(workCh)
+				a.flushAllTo(workerChs)
+				closeWorkers()
 				a.wg.Wait()
 				return nil
 			}
 
 			a.stats.EventsReceived++
 
-			// Buffer the event
+			// Buffer the event (per-table, preserves arrival order within a table)
 			a.bufferEvent(event)
 
-			// Check if any buffer is full and flush it
-			a.flushFullTo(workCh)
+			// Flush any full buffer to its table's fixed worker
+			a.flushFullTo(workerChs)
 
 		case <-flushTicker.C:
-			a.flushAllTo(workCh)
+			a.flushAllTo(workerChs)
 		}
 	}
 }
@@ -215,17 +239,19 @@ func (a *Applier) bufferEvent(event *CDCEvent) {
 	buf.add(event)
 }
 
-// flushFullTo flushes all full buffers to the work channel.
-func (a *Applier) flushFullTo(workCh chan<- *CDCEvent) {
+// flushFullTo flushes all full buffers, routing each table's events to its
+// fixed worker channel so per-table order is preserved.
+func (a *Applier) flushFullTo(workerChs []chan *CDCEvent) {
 	a.buffersMu.Lock()
 	defer a.buffersMu.Unlock()
 
 	for _, buf := range a.buffers {
 		if buf.isFull() {
+			ch := workerFor(buf.tableKey, workerChs)
 			flushed := buf.flush()
 			for _, evt := range flushed {
 				select {
-				case workCh <- evt:
+				case ch <- evt:
 				case <-a.ctx.Done():
 					return
 				}
@@ -237,8 +263,9 @@ func (a *Applier) flushFullTo(workCh chan<- *CDCEvent) {
 	}
 }
 
-// flushAllTo flushes all non-empty buffers to the work channel.
-func (a *Applier) flushAllTo(workCh chan<- *CDCEvent) {
+// flushAllTo flushes all non-empty buffers, routing each table's events to its
+// fixed worker channel so per-table order is preserved.
+func (a *Applier) flushAllTo(workerChs []chan *CDCEvent) {
 	a.buffersMu.Lock()
 	defer a.buffersMu.Unlock()
 
@@ -246,10 +273,11 @@ func (a *Applier) flushAllTo(workCh chan<- *CDCEvent) {
 		if len(buf.events) == 0 {
 			continue
 		}
+		ch := workerFor(buf.tableKey, workerChs)
 		flushed := buf.flush()
 		for _, evt := range flushed {
 			select {
-			case workCh <- evt:
+			case ch <- evt:
 			case <-a.ctx.Done():
 				return
 			}
@@ -364,6 +392,26 @@ func (a *Applier) applyConflictStrategy(sql string, kind EventKind) string {
 // Stats returns the current apply statistics.
 func (a *Applier) Stats() ApplierStats {
 	return a.stats.Snapshot()
+}
+
+// workerFor returns the fixed worker channel for a table: hashing the table key
+// means every event for a given table lands on the same worker, so that worker
+// applies the table's events serially in arrival order (#t48 Bug#8). Different
+// tables hash independently and may share a worker, but never reorder within a
+// table. Modulo-before-cast keeps the index non-negative on all platforms.
+func workerFor(tableKey string, workerChs []chan *CDCEvent) chan<- *CDCEvent {
+	return workerChs[int(fnv1a32(tableKey)%uint32(len(workerChs)))]
+}
+
+// fnv1a32 is a stable, allocation-free string hash (FNV-1a 32) for routing.
+func fnv1a32(s string) uint32 {
+	const offset, prime uint32 = 2166136261, 16777619
+	h := offset
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= prime
+	}
+	return h
 }
 
 // tableKey returns the canonical table identifier.
