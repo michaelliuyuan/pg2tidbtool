@@ -124,6 +124,8 @@ func NewServer(store *store.Store, host string, port int, dataDir string, static
 		})
 		r.Get("/ws", s.handleWebSocket)
 			r.Post("/assess", s.handleAssess)
+			// CDC endpoints
+			r.Get("/cdc/status", s.handleCDCStatus)
 	})
 
 	if staticFS != (embed.FS{}) {
