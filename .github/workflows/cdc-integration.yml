@@ -1,0 +1,73 @@
+name: cdc-integration
+
+# Real-PostgreSQL integration tier — the protocol-layer regression gate for the
+# CDC package (#t48). Bug#4/5/6/7 all slipped past mocked unit tests and only
+# failed against a real PG; this tier runs the actual logical-replication
+# handshake so that class of bug is caught before merge.
+#
+# Scope: only runs when CDC code changes, so it does not slow unrelated PRs (a
+# tier that's slow on every PR tends to get disabled -> silent-green). When it
+# DOES run it must pass: PG is provisioned with wal_level=logical, and a
+# missing/unreachable PG is a failure, never a silent skip (see the CI guard in
+# cdc_integration_test.go).
+
+on:
+  pull_request:
+    paths:
+      - 'internal/cdc/**'
+      - '.github/workflows/cdc-integration.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'internal/cdc/**'
+      - '.github/workflows/cdc-integration.yml'
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHA `services` cannot override the postgres command, and the default
+      # image runs wal_level=replica (no logical decoding). Start PG manually
+      # with the flags pgoutput logical replication requires.
+      - name: Start PostgreSQL (logical replication)
+        run: |
+          docker run -d --name pgcdc --rm \
+            -e POSTGRES_PASSWORD=pg2tidb \
+            -e POSTGRES_DB=cdcitest \
+            -p 5432:5432 \
+            postgres:16 \
+            postgres -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
+
+      - name: Wait for PG and confirm wal_level=logical
+        run: |
+          for i in $(seq 1 40); do
+            if docker exec pgcdc pg_isready -U postgres -d cdcitest >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec pgcdc pg_isready -U postgres -d cdcitest
+          # Fail fast if the command override did not take (would make the
+          # handshake test fail anyway, but this gives a clear signal).
+          docker exec pgcdc psql -U postgres -d cdcitest -tAc "SHOW wal_level;" | grep -qx logical
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Run CDC integration tier
+        env:
+          CI: "true"
+          CDC_TEST_PG_HOST: localhost
+          CDC_TEST_PG_PORT: "5432"
+          CDC_TEST_PG_USER: postgres
+          CDC_TEST_PG_PASSWORD: pg2tidb
+          CDC_TEST_PG_DATABASE: cdcitest
+          CDC_TEST_PG_SSLMODE: disable
+        run: go test -tags=integration ./internal/cdc/ -run TestIntegration -v -timeout 120s
+
+      - name: Stop PostgreSQL
+        if: always()
+        run: docker stop pgcdc || true

@@ -41,7 +41,12 @@ func integrationPGConfig(t *testing.T) (host string, port int, user, password, d
 	t.Helper()
 	host = os.Getenv("CDC_TEST_PG_HOST")
 	if host == "" {
-		t.Skip("CDC_TEST_PG_HOST unset; skipping real-PG integration test")
+		// In CI the tier MUST run — a silent skip here is exactly the
+		// "always-green" antipattern this tier exists to prevent (#t48).
+		if os.Getenv("CI") != "" {
+			t.Fatal("CDC_TEST_PG_HOST unset in CI: integration tier must run, not silently skip")
+		}
+		t.Skip("CDC_TEST_PG_HOST unset; skipping real-PG integration test (local dev)")
 	}
 	port, _ = strconv.Atoi(os.Getenv("CDC_TEST_PG_PORT"))
 	if port == 0 {
