@@ -158,12 +158,20 @@ func (r *Runner) Run(ctx context.Context) error {
 			if err != nil {
 				r.log.Error("cdc runner: applier error", zap.Error(err))
 			}
-			// Final checkpoint save
+			// If the source halted on a fatal (e.g. parse failure), surface it so
+			// the stop is reported as a failure, not a clean shutdown. The
+			// checkpoint is saved at the last-good LSN (≤ the failure), so a
+			// restart re-reads the failed record (at-least-once). #t48 step 2.
+			srcErr := r.source.Err()
+			// Final checkpoint save (last-good LSN, never past the failure)
 			r.checkpoint.Update(r.source.CurrentLSN())
 			if saveErr := r.checkpoint.Save(); saveErr != nil {
 				r.log.Error("cdc runner: final checkpoint save failed", zap.Error(saveErr))
 			}
 			r.source.Stop()
+			if srcErr != nil {
+				return fmt.Errorf("cdc runner: source halted on fatal: %w", srcErr)
+			}
 			return err
 
 		case sig := <-sigCh:

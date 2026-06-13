@@ -26,6 +26,7 @@ type Source struct {
 	relations map[uint32]*Relation // relation OID → schema info
 	running   bool
 	stopCh    chan struct{}
+	fatalErr  error // set when the stream halts on an unrecoverable error (e.g. parse failure); see Err()
 
 	// Metrics
 	eventsReceived int64
@@ -271,9 +272,11 @@ func (s *Source) streamLoop(ctx context.Context, conn *pgconn.PgConn, events cha
 			if pkm.ReplyRequested {
 				nextStandbyMessageDeadline = time.Time{} // force immediate reply
 			}
-			if pkm.ServerWALEnd > s.lsnCurrent {
-				s.lsnCurrent = pkm.ServerWALEnd
-			}
+			// Do NOT advance lsnCurrent from ServerWALEnd: a keepalive reports the
+			// server's WAL end, which can be past records we have not yet parsed/
+			// applied. ACKing it would let PG reclaim those records (silent loss).
+			// lsnCurrent advances only on a successfully parsed XLogData record.
+			// See #t48 step 2.
 
 		case pglogrepl.XLogDataByteID:
 			xld, err := pglogrepl.ParseXLogData(msg.Data[1:])
@@ -281,12 +284,22 @@ func (s *Source) streamLoop(ctx context.Context, conn *pgconn.PgConn, events cha
 				s.log.Error("parse xlogdata", zap.Error(err))
 				continue
 			}
+
+			// Parse the logical message BEFORE advancing the LSN. On a parse
+			// failure we HALT and hold lsnCurrent at the last successfully
+			// processed record, so the standby ACK never covers this record → PG
+			// retains the WAL → on restart the record is re-sent (at-least-once).
+			// Advancing first would silently lose it. See #t48 step 2.
+			event, perr := s.parseLogicalMsg(relations, xld)
+			if perr != nil {
+				s.setFatal(fmt.Errorf("lsn %s: %w", xld.WALStart.String(), perr))
+				return
+			}
+			// Success (data event or control message): safe to confirm up to the
+			// start of this record (= end of the previous record, one-behind).
 			if xld.WALStart > s.lsnCurrent {
 				s.lsnCurrent = xld.WALStart
 			}
-
-			// Parse the logical replication message
-			event := s.parseLogicalMsg(relations, xld)
 			if event != nil {
 				select {
 				case events <- event:
@@ -314,7 +327,7 @@ func (s *Source) streamLoop(ctx context.Context, conn *pgconn.PgConn, events cha
 }
 
 // parseLogicalMsg converts a pgoutput logical replication message into a CDCEvent.
-func (s *Source) parseLogicalMsg(relations map[uint32]*Relation, xld pglogrepl.XLogData) *CDCEvent {
+func (s *Source) parseLogicalMsg(relations map[uint32]*Relation, xld pglogrepl.XLogData) (*CDCEvent, error) {
 	// inStream=false: pglogrepl.ParseV2's second arg is the streaming-large-tx flag.
 	// It must be true ONLY while inside a StreamStart..StreamStop sequence (the WAL
 	// records then carry a 4-byte XID prefix). This client does not implement the
@@ -324,8 +337,9 @@ func (s *Source) parseLogicalMsg(relations map[uint32]*Relation, xld pglogrepl.X
 	// (expect N/K/O, actual \x00) and silently dropping all DML. See #t48 Bug#4.
 	logMsg, err := pglogrepl.ParseV2(xld.WALData, false)
 	if err != nil {
-		s.log.Error("parse logical msg", zap.Error(err))
-		return nil
+		// Return the error so the caller halts (holding LSN) instead of silently
+		// skipping the record. Silent skip = silent data loss. See #t48 step 2.
+		return nil, fmt.Errorf("pglogrepl parse: %w", err)
 	}
 
 	switch v := logMsg.(type) {
@@ -346,12 +360,12 @@ func (s *Source) parseLogicalMsg(relations map[uint32]*Relation, xld pglogrepl.X
 			})
 		}
 		relations[v.RelationID] = rel
-		return nil // relation message is not a data event
+		return nil, nil // relation message is not a data event
 
 	case *pglogrepl.InsertMessageV2:
 		rel, ok := relations[v.RelationID]
 		if !ok {
-			return nil
+			return nil, nil
 		}
 		return &CDCEvent{
 			LSN:       xld.WALStart,
@@ -360,12 +374,12 @@ func (s *Source) parseLogicalMsg(relations map[uint32]*Relation, xld pglogrepl.X
 			Schema:    rel.Schema,
 			Table:     rel.Name,
 			Columns:   decodeTupleColumns(rel, v.Tuple, false), // full new image ('N')
-		}
+		}, nil
 
 	case *pglogrepl.UpdateMessageV2:
 		rel, ok := relations[v.RelationID]
 		if !ok {
-			return nil
+			return nil, nil
 		}
 		// Under REPLICA IDENTITY DEFAULT a non-key UPDATE carries NO old tuple;
 		// the transformer then builds WHERE from the new image's PK columns
@@ -384,12 +398,12 @@ func (s *Source) parseLogicalMsg(relations map[uint32]*Relation, xld pglogrepl.X
 			Table:      rel.Name,
 			Columns:    decodeTupleColumns(rel, v.NewTuple, false), // full new image ('N')
 			OldColumns: oldCols,
-		}
+		}, nil
 
 	case *pglogrepl.DeleteMessageV2:
 		rel, ok := relations[v.RelationID]
 		if !ok {
-			return nil
+			return nil, nil
 		}
 		// DELETE always carries a key/old tuple: 'K' (PK only) under DEFAULT,
 		// 'O' (all columns) under FULL. Map accordingly so the PK columns keep
@@ -406,15 +420,15 @@ func (s *Source) parseLogicalMsg(relations map[uint32]*Relation, xld pglogrepl.X
 			Schema:    rel.Schema,
 			Table:     rel.Name,
 			Columns:   cols,
-		}
+		}, nil
 
 	case *pglogrepl.TruncateMessageV2:
 		if len(v.RelationIDs) == 0 {
-			return nil
+			return nil, nil
 		}
 		rel, ok := relations[v.RelationIDs[0]]
 		if !ok {
-			return nil
+			return nil, nil
 		}
 		return &CDCEvent{
 			LSN:       xld.WALStart,
@@ -422,10 +436,10 @@ func (s *Source) parseLogicalMsg(relations map[uint32]*Relation, xld pglogrepl.X
 			Kind:      EventTruncate,
 			Schema:    rel.Schema,
 			Table:     rel.Name,
-		}
+		}, nil
 
 	default:
-		return nil
+		return nil, nil
 	}
 }
 
@@ -507,6 +521,27 @@ func (s *Source) Stop() {
 	if s.running {
 		close(s.stopCh)
 	}
+}
+
+// setFatal records a fatal error that halted the stream and wakes any waiter.
+// Used when the stream must stop to prevent silent data loss (e.g. a message
+// that cannot be parsed must not be silently skipped — see #t48 step 2).
+func (s *Source) setFatal(err error) {
+	s.mu.Lock()
+	if s.fatalErr == nil {
+		s.fatalErr = err
+	}
+	s.mu.Unlock()
+	s.log.Error("cdc stream halted on fatal (data-loss prevention)", zap.Error(err))
+}
+
+// Err returns the fatal error that halted the stream, or nil if it stopped
+// cleanly. The runner consults this when the events channel closes to decide
+// whether the stop was a clean shutdown or a halt.
+func (s *Source) Err() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fatalErr
 }
 
 // CurrentLSN returns the most recently observed LSN.

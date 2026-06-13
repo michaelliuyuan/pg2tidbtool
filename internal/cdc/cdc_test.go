@@ -2,11 +2,13 @@ package cdc
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/jackc/pglogrepl"
+	"go.uber.org/zap"
 )
 
 func TestTransformer_Insert(t *testing.T) {
@@ -356,6 +358,40 @@ func TestDecodeUnchangedTOAST(t *testing.T) {
 	}
 	if cols[2].Value != nil {
 		t.Errorf("bio Value = %v, want nil for unchanged column", cols[2].Value)
+	}
+}
+
+// TestParseLogicalMsg_BadInputReturnsError guards #t48 step 2: an unparseable
+// WAL record must surface as an error (so the caller halts), never a silent nil.
+func TestParseLogicalMsg_BadInputReturnsError(t *testing.T) {
+	s := &Source{log: zap.NewNop()}
+	// 0x5a ('Z') is not a pgoutput message type -> ParseV2 returns errMsgNotSupported.
+	xld := pglogrepl.XLogData{WALStart: 100, WALData: []byte{0x5a}}
+	event, err := s.parseLogicalMsg(map[uint32]*Relation{}, xld)
+	if err == nil {
+		t.Fatal("expected error for unparseable WAL data; parseLogicalMsg must not silently skip (data-loss prevention)")
+	}
+	if event != nil {
+		t.Errorf("expected nil event on parse error, got %+v", event)
+	}
+}
+
+// TestSource_FatalErr guards the halt-signaling mechanism (#t48 step 2): a fresh
+// Source has no fatal; setFatal records it (sticky); Err() exposes it so the
+// runner can report a halt rather than a clean shutdown.
+func TestSource_FatalErr(t *testing.T) {
+	s := &Source{log: zap.NewNop()}
+	if err := s.Err(); err != nil {
+		t.Errorf("fresh source Err() = %v, want nil", err)
+	}
+	s.setFatal(fmt.Errorf("boom"))
+	if err := s.Err(); err == nil || err.Error() != "boom" {
+		t.Errorf("after setFatal, Err() = %v, want \"boom\"", err)
+	}
+	// Sticky: the first fatal wins (don't clobber the original cause).
+	s.setFatal(fmt.Errorf("second"))
+	if err := s.Err(); err.Error() != "boom" {
+		t.Errorf("Err() = %v, want sticky \"boom\"", err)
 	}
 }
 
