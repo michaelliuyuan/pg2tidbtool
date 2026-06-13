@@ -37,7 +37,8 @@ type CDCEvent struct {
 type ColumnValue struct {
 	Name  string      `json:"name"`
 	Value interface{} `json:"value"`
-	Type  string      `json:"type"` // PG data type OID string
+	Type  string      `json:"type"`             // PG data type OID string
+	IsKey bool        `json:"is_key,omitempty"` // part of the relation PK / replica identity (from RelationMessage KeyColumn flag)
 }
 
 // Checkpoint records the last successfully processed LSN.

@@ -304,7 +304,14 @@ func (s *Source) streamLoop(ctx context.Context, conn *pgconn.PgConn, events cha
 
 // parseLogicalMsg converts a pgoutput logical replication message into a CDCEvent.
 func (s *Source) parseLogicalMsg(relations map[uint32]*Relation, xld pglogrepl.XLogData) *CDCEvent {
-	logMsg, err := pglogrepl.ParseV2(xld.WALData, true)
+	// inStream=false: pglogrepl.ParseV2's second arg is the streaming-large-tx flag.
+	// It must be true ONLY while inside a StreamStart..StreamStop sequence (the WAL
+	// records then carry a 4-byte XID prefix). This client does not implement the
+	// streaming protocol, so every message is a normal committed-transaction record
+	// with NO XID prefix → inStream must be false. Passing true made readXidAndAdvance
+	// consume 4 phantom bytes, misaligning every Insert/Update/Delete decode
+	// (expect N/K/O, actual \x00) and silently dropping all DML. See #t48 Bug#4.
+	logMsg, err := pglogrepl.ParseV2(xld.WALData, false)
 	if err != nil {
 		s.log.Error("parse logical msg", zap.Error(err))
 		return nil
@@ -335,22 +342,13 @@ func (s *Source) parseLogicalMsg(relations map[uint32]*Relation, xld pglogrepl.X
 		if !ok {
 			return nil
 		}
-		cols := make([]ColumnValue, 0, len(v.Tuple.Columns))
-		for i, col := range v.Tuple.Columns {
-			cv := ColumnValue{
-				Name:  rel.Columns[i].Name,
-				Value: string(col.Data),
-				Type:  rel.Columns[i].TypeName,
-			}
-			cols = append(cols, cv)
-		}
 		return &CDCEvent{
 			LSN:       xld.WALStart,
 			Timestamp: time.Now(),
 			Kind:      EventInsert,
 			Schema:    rel.Schema,
 			Table:     rel.Name,
-			Columns:   cols,
+			Columns:   decodeTupleColumns(rel, v.Tuple, false), // full new image ('N')
 		}
 
 	case *pglogrepl.UpdateMessageV2:
@@ -358,34 +356,22 @@ func (s *Source) parseLogicalMsg(relations map[uint32]*Relation, xld pglogrepl.X
 		if !ok {
 			return nil
 		}
-		cols := make([]ColumnValue, 0, len(v.NewTuple.Columns))
-		for i, col := range v.NewTuple.Columns {
-			cv := ColumnValue{
-				Name:  rel.Columns[i].Name,
-				Value: string(col.Data),
-				Type:  rel.Columns[i].TypeName,
-			}
-			cols = append(cols, cv)
-		}
+		// Under REPLICA IDENTITY DEFAULT a non-key UPDATE carries NO old tuple;
+		// the transformer then builds WHERE from the new image's PK columns
+		// (PK is unchanged). When an old tuple IS present, 'K' carries only the
+		// PK columns while 'O' (FULL) carries all columns — map accordingly.
 		var oldCols []ColumnValue
 		if v.OldTuple != nil {
-			oldCols = make([]ColumnValue, 0, len(v.OldTuple.Columns))
-			for i, col := range v.OldTuple.Columns {
-				cv := ColumnValue{
-					Name:  rel.Columns[i].Name,
-					Value: string(col.Data),
-					Type:  rel.Columns[i].TypeName,
-				}
-				oldCols = append(oldCols, cv)
-			}
+			oldCols = decodeTupleColumns(rel, v.OldTuple,
+				v.OldTupleType == pglogrepl.UpdateMessageTupleTypeKey)
 		}
 		return &CDCEvent{
-			LSN:       xld.WALStart,
-			Timestamp: time.Now(),
-			Kind:      EventUpdate,
-			Schema:    rel.Schema,
-			Table:     rel.Name,
-			Columns:   cols,
+			LSN:        xld.WALStart,
+			Timestamp:  time.Now(),
+			Kind:       EventUpdate,
+			Schema:     rel.Schema,
+			Table:      rel.Name,
+			Columns:    decodeTupleColumns(rel, v.NewTuple, false), // full new image ('N')
 			OldColumns: oldCols,
 		}
 
@@ -394,17 +380,13 @@ func (s *Source) parseLogicalMsg(relations map[uint32]*Relation, xld pglogrepl.X
 		if !ok {
 			return nil
 		}
+		// DELETE always carries a key/old tuple: 'K' (PK only) under DEFAULT,
+		// 'O' (all columns) under FULL. Map accordingly so the PK columns keep
+		// correct names + IsKey regardless of replica-identity mode.
 		var cols []ColumnValue
 		if v.OldTuple != nil {
-			cols = make([]ColumnValue, 0, len(v.OldTuple.Columns))
-			for i, col := range v.OldTuple.Columns {
-				cv := ColumnValue{
-					Name:  rel.Columns[i].Name,
-					Value: string(col.Data),
-					Type:  rel.Columns[i].TypeName,
-				}
-				cols = append(cols, cv)
-			}
+			cols = decodeTupleColumns(rel, v.OldTuple,
+				v.OldTupleType == pglogrepl.DeleteMessageTupleTypeKey)
 		}
 		return &CDCEvent{
 			LSN:       xld.WALStart,
@@ -434,6 +416,66 @@ func (s *Source) parseLogicalMsg(relations map[uint32]*Relation, xld pglogrepl.X
 	default:
 		return nil
 	}
+}
+
+// decodeTupleColumns maps a pgoutput TupleData onto ColumnValues using the
+// relation schema learned from RelationMessageV2.
+//
+// pgoutput tuple images differ in width depending on replica identity:
+//   - 'N' (new image) and 'O' (FULL old image) carry ALL relation columns,
+//     positionally aligned with rel.Columns.
+//   - 'K' (key image, used by DEFAULT replica identity for UPDATE-of-PK and all
+//     DELETE) carries ONLY the PK columns, in relation column order.
+//
+// isKeyTuple selects between the two mappings. NULL columns ('n') map to a nil
+// value so the transformer renders NULL (not ''). Every column carries the
+// relation's IsKey flag so the transformer can build a PK-only WHERE without
+// relying on old/new image presence. See #t48 Bug#5.
+func decodeTupleColumns(rel *Relation, tuple *pglogrepl.TupleData, isKeyTuple bool) []ColumnValue {
+	if tuple == nil {
+		return nil
+	}
+	out := make([]ColumnValue, 0, len(tuple.Columns))
+	if isKeyTuple {
+		// Key image: only PK columns, in relation order.
+		ki := 0
+		for _, rc := range rel.Columns {
+			if !rc.IsKey {
+				continue
+			}
+			if ki >= len(tuple.Columns) {
+				break
+			}
+			out = append(out, decodeColumnValue(rc, tuple.Columns[ki]))
+			ki++
+		}
+		return out
+	}
+	// Full image: positional alignment with rel.Columns.
+	for i, c := range tuple.Columns {
+		if i >= len(rel.Columns) {
+			break
+		}
+		out = append(out, decodeColumnValue(rel.Columns[i], c))
+	}
+	return out
+}
+
+// decodeColumnValue builds a ColumnValue from a single tuple column, carrying
+// the relation column's name/type/IsKey and rendering NULL ('n') as nil.
+func decodeColumnValue(rc RelationColumn, c *pglogrepl.TupleDataColumn) ColumnValue {
+	cv := ColumnValue{
+		Name:  rc.Name,
+		Type:  rc.TypeName,
+		IsKey: rc.IsKey,
+	}
+	if c != nil && c.DataType == pglogrepl.TupleDataTypeNull {
+		cv.Value = nil
+	} else {
+		// 't' text / 'b' binary -> text representation; 'u' unchanged -> no value.
+		cv.Value = string(c.Data)
+	}
+	return cv
 }
 
 // Stop gracefully stops the replication stream.

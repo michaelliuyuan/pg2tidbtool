@@ -116,16 +116,22 @@ func (t *Transformer) transformDDL(event *CDCEvent) (string, error) {
 	return event.DDL, nil
 }
 
-// buildWhere constructs WHERE clauses from the event's columns.
-// Prefers old columns (UPDATE) for the WHERE to match the original row.
+// buildWhere constructs a PK-based WHERE clause for UPDATE/DELETE.
+//
+// Per #t48 Bug#5: the WHERE must target the row identity (PK / replica
+// identity) only — never the full new-image row. Under REPLICA IDENTITY DEFAULT
+// a non-key UPDATE carries no old tuple, so we fall back to the NEW image's PK
+// columns (the PK is unchanged for a non-key update). With no usable PK (table
+// without a replica identity) this returns empty and the caller errors out
+// rather than emitting a silent 0-row no-op.
 func (t *Transformer) buildWhere(event *CDCEvent) []string {
-	source := event.Columns
-	if len(event.OldColumns) > 0 {
-		source = event.OldColumns
+	keys := keyColumns(event.OldColumns) // prefer old image (UPDATE-of-PK, FULL identity)
+	if len(keys) == 0 {
+		keys = keyColumns(event.Columns) // fall back to new image PK (DEFAULT non-key update, DELETE key image)
 	}
 
 	var clauses []string
-	for _, col := range source {
+	for _, col := range keys {
 		if col.Value == nil {
 			clauses = append(clauses,
 				fmt.Sprintf("%s IS NULL", quoteMySQLIdent(col.Name)))
@@ -135,6 +141,17 @@ func (t *Transformer) buildWhere(event *CDCEvent) []string {
 		}
 	}
 	return clauses
+}
+
+// keyColumns returns only the PK / replica-identity columns from a column slice.
+func keyColumns(cols []ColumnValue) []ColumnValue {
+	var out []ColumnValue
+	for _, c := range cols {
+		if c.IsKey {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // formatValue formats a column value for MySQL/TiDB SQL.
