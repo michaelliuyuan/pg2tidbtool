@@ -437,3 +437,35 @@ func TestSourceConfigDefaults(t *testing.T) {
 		t.Errorf("OutputPlugin = %q, want pgoutput", cfg.OutputPlugin)
 	}
 }
+
+// TestBuildPluginArgs guards #t48 Bug#6: pglogrepl joins PluginArgs raw with
+// ", " (no quoting), so each element must be a complete `name 'value'` option.
+// Bare "proto_version"/"2"/... made START_REPLICATION raise SQLSTATE 42601.
+func TestBuildPluginArgs(t *testing.T) {
+	args := buildPluginArgs("pg2tidb_pub")
+
+	if len(args) != 2 {
+		t.Fatalf("got %d args, want 2", len(args))
+	}
+	if args[0] != "proto_version '2'" {
+		t.Errorf("args[0] = %q, want `proto_version '2'`", args[0])
+	}
+	if args[1] != "publication_names 'pg2tidb_pub'" {
+		t.Errorf("args[1] = %q, want `publication_names 'pg2tidb_pub'`", args[1])
+	}
+
+	// Joined form must be valid PG START_REPLICATION option syntax:
+	// (proto_version '2', publication_names 'pg2tidb_pub')
+	joined := args[0] + ", " + args[1]
+	want := "proto_version '2', publication_names 'pg2tidb_pub'"
+	if joined != want {
+		t.Errorf("joined = %q, want %q", joined, want)
+	}
+
+	// No element may be a bare unquoted value (the Bug#6 regression shape).
+	for _, a := range args {
+		if a == "2" || a == "proto_version" || a == "publication_names" {
+			t.Errorf("bare token %q in plugin args (Bug#6 regression)", a)
+		}
+	}
+}

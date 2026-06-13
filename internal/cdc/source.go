@@ -129,6 +129,20 @@ func (s *Source) Setup(ctx context.Context) error {
 	return nil
 }
 
+// buildPluginArgs builds the pgoutput plugin options for START_REPLICATION.
+//
+// pglogrepl joins PluginArgs raw with ", " into the option list — it does NOT
+// add quotes. PG's START_REPLICATION requires each option value as a
+// single-quoted string literal: `(proto_version '2', publication_names 'pub')`.
+// Passing bare `proto_version, 2, ...` makes PG see 4 separate tokens and raise
+// SQLSTATE 42601 (syntax_error) at handshake. See #t48 Bug#6.
+func buildPluginArgs(publication string) []string {
+	return []string{
+		"proto_version '2'",
+		"publication_names '" + publication + "'",
+	}
+}
+
 // Start begins streaming logical replication changes from PG.
 // It creates the replication connection, starts the slot, and begins consuming.
 func (s *Source) Start(ctx context.Context, startLSN pglogrepl.LSN) (<-chan *CDCEvent, error) {
@@ -172,10 +186,7 @@ func (s *Source) Start(ctx context.Context, startLSN pglogrepl.LSN) (<-chan *CDC
 	}
 
 	// Start replication
-	pluginArgs := []string{
-		"proto_version", "2",
-		"publication_names", s.cfg.Publication,
-	}
+	pluginArgs := buildPluginArgs(s.cfg.Publication)
 	err = pglogrepl.StartReplication(ctx, conn, s.cfg.SlotName, slotLSN,
 		pglogrepl.StartReplicationOptions{
 			PluginArgs: pluginArgs,
