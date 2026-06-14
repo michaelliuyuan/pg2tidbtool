@@ -35,6 +35,10 @@ const route = useRoute()
           <el-icon><DataAnalysis /></el-icon>
           <span>兼容性评估</span>
         </el-menu-item>
+        <el-menu-item index="/cdc">
+          <el-icon><DataLine /></el-icon>
+          <span>CDC 增量同步</span>
+        </el-menu-item>
       </el-menu>
     </el-header>
     <el-main style="background: #f5f7fa; padding: 24px;">
