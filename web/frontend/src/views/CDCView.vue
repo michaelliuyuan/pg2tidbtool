@@ -4,99 +4,98 @@
     <p class="subtitle">PostgreSQL → TiDB 实时增量同步监控</p>
 
     <!-- Status Card -->
-    <div class="status-card" :class="{ running: status.running, stopped: !status.running }">
+    <div class="status-card" :class="statusState">
       <div class="status-indicator">
         <span class="status-dot" :class="{ active: status.running }"></span>
-        <span class="status-text">{{ status.running ? '运行中' : '已停止' }}</span>
+        <span class="status-text">{{ statusLabel }}</span>
       </div>
       <div class="status-meta">
-        <span v-if="status.running && status.source_lsn">LSN: {{ status.source_lsn }}</span>
+        <span v-if="status.running && status.lsn">LSN: {{ status.lsn }}</span>
         <span v-else>{{ status.message || 'CDC 未运行，使用 pg2tidb cdc 命令启动' }}</span>
+      </div>
+      <div class="status-meta" v-if="status.fatal_error" style="color: #fff; opacity: 0.95;">
+        ⚠️ {{ status.fatal_error }}
       </div>
     </div>
 
     <!-- Stats Grid -->
     <div class="stats-grid" v-if="stats">
       <div class="stat-item">
-        <div class="stat-value">{{ formatNumber(stats.source_events_total) }}</div>
+        <div class="stat-value">{{ formatNumber(stats.source_events) }}</div>
         <div class="stat-label">源端事件</div>
       </div>
       <div class="stat-item">
-        <div class="stat-value">{{ formatNumber(stats.applier_events_applied) }}</div>
+        <div class="stat-value">{{ formatNumber(stats.applied) }}</div>
         <div class="stat-label">已应用</div>
       </div>
       <div class="stat-item">
-        <div class="stat-value" :class="{ error: stats.applier_events_failed > 0 }">{{ formatNumber(stats.applier_events_failed) }}</div>
+        <div class="stat-value" :class="{ error: stats.failed > 0 }">{{ formatNumber(stats.failed) }}</div>
         <div class="stat-label">失败</div>
       </div>
       <div class="stat-item">
-        <div class="stat-value">{{ formatNumber(stats.applier_events_skipped) }}</div>
+        <div class="stat-value">{{ formatNumber(stats.skipped) }}</div>
         <div class="stat-label">已跳过</div>
       </div>
       <div class="stat-item">
-        <div class="stat-value">{{ stats.events_per_second?.toFixed(1) || '0' }}/s</div>
+        <div class="stat-value">{{ stats.throughput_rps?.toFixed(1) || '0' }}/s</div>
         <div class="stat-label">吞吐量</div>
       </div>
       <div class="stat-item">
-        <div class="stat-value">{{ formatNumber(stats.lag_events) }}</div>
-        <div class="stat-label">延迟事件</div>
+        <div class="stat-value">{{ stats.lag_seconds?.toFixed(1) || '0' }}s</div>
+        <div class="stat-label">延迟(秒)</div>
       </div>
       <div class="stat-item">
         <div class="stat-value">{{ formatUptime(stats.uptime_seconds) }}</div>
         <div class="stat-label">运行时间</div>
       </div>
       <div class="stat-item">
-        <div class="stat-value">{{ formatNumber(stats.applier_batches_flushed) }}</div>
+        <div class="stat-value">{{ formatNumber(stats.batches) }}</div>
         <div class="stat-label">批次数</div>
       </div>
     </div>
 
     <!-- Checkpoint Card -->
-    <div class="detail-card" v-if="checkpoint">
+    <div class="detail-card" v-if="checkpoint && checkpoint.lsn">
       <h3>📌 检查点</h3>
       <div class="detail-row">
         <span class="detail-label">LSN:</span>
         <code>{{ checkpoint.lsn }}</code>
       </div>
-      <div class="detail-row">
+      <div class="detail-row" v-if="status.slot">
         <span class="detail-label">Slot:</span>
-        <code>{{ checkpoint.slot_name }}</code>
+        <code>{{ status.slot }}</code>
       </div>
       <div class="detail-row">
         <span class="detail-label">更新时间:</span>
-        <span>{{ checkpoint.timestamp ? new Date(checkpoint.timestamp).toLocaleString() : '-' }}</span>
+        <span>{{ checkpoint.updated_at ? new Date(checkpoint.updated_at).toLocaleString() : '-' }}</span>
       </div>
     </div>
 
-    <!-- Config Card -->
-    <div class="detail-card" v-if="config">
+    <!-- Config Card (from status: slot/publication/pid) -->
+    <div class="detail-card" v-if="status.slot || status.publication">
       <h3>⚙️ 配置</h3>
-      <div class="detail-row">
+      <div class="detail-row" v-if="status.slot">
         <span class="detail-label">Slot:</span>
-        <code>{{ config.slot_name }}</code>
+        <code>{{ status.slot }}</code>
       </div>
-      <div class="detail-row">
+      <div class="detail-row" v-if="status.publication">
         <span class="detail-label">Publication:</span>
-        <code>{{ config.publication }}</code>
+        <code>{{ status.publication }}</code>
       </div>
-      <div class="detail-row">
-        <span class="detail-label">冲突策略:</span>
-        <span>{{ config.conflict_strategy }}</span>
+      <div class="detail-row" v-if="status.pid">
+        <span class="detail-label">PID:</span>
+        <code>{{ status.pid }}</code>
       </div>
-      <div class="detail-row">
-        <span class="detail-label">批量大小:</span>
-        <span>{{ config.batch_size }}</span>
-      </div>
-      <div class="detail-row">
-        <span class="detail-label">并行度:</span>
-        <span>{{ config.parallel }}</span>
+      <div class="detail-row" v-if="status.uptime_seconds">
+        <span class="detail-label">运行时长:</span>
+        <span>{{ formatUptime(status.uptime_seconds) }}</span>
       </div>
     </div>
 
     <!-- Error display -->
-    <div class="error-card" v-if="stats?.applier_last_error">
+    <div class="error-card" v-if="stats && stats.last_error">
       <h3>⚠️ 最近错误</h3>
-      <pre>{{ stats.applier_last_error }}</pre>
+      <pre>{{ stats.last_error }}</pre>
     </div>
 
     <!-- Refresh button -->
@@ -108,49 +107,64 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 
 const API_BASE = '/api/v1/cdc'
 
+// Mirrors the web API contract (docs/cdc-web-monitoring-contract.md, #t48 B).
 interface CDCStatus {
+  available?: boolean
   running: boolean
-  source_lsn?: string
+  state?: string // not_running | running | stale | halted
   message?: string
-  config?: CDCConfig
-}
-
-interface CDCConfig {
-  slot_name: string
-  publication: string
-  conflict_strategy: string
-  batch_size: number
-  parallel: number
+  lsn?: string
+  slot?: string
+  publication?: string
+  pid?: number
+  uptime_seconds?: number
+  fatal_error?: string
 }
 
 interface CDCStats {
-  source_events_total: number
-  applier_events_applied: number
-  applier_events_failed: number
-  applier_events_skipped: number
-  applier_batches_flushed: number
-  events_per_second: number
-  lag_events: number
+  source_events: number
+  applied: number
+  failed: number
+  skipped: number
+  batches: number
+  throughput_rps: number
+  lag_seconds: number
   uptime_seconds: number
-  applier_last_error?: string
+  last_error?: string
 }
 
 interface CDCCheckpoint {
   lsn: string
-  slot_name: string
-  timestamp: string
+  updated_at: string
 }
 
 const status = ref<CDCStatus>({ running: false })
 const stats = ref<CDCStats | null>(null)
 const checkpoint = ref<CDCCheckpoint | null>(null)
-const config = ref<CDCConfig | null>(null)
 const refreshInterval = ref(5)
 let timer: ReturnType<typeof setInterval> | null = null
+
+const statusState = computed(() => {
+  switch (status.value.state) {
+    case 'running': return 'running'
+    case 'halted': return 'halted'
+    case 'stale': return 'stale'
+    default: return 'stopped'
+  }
+})
+
+const statusLabel = computed(() => {
+  switch (status.value.state) {
+    case 'running': return '运行中'
+    case 'halted': return '已停止 (halt)'
+    case 'stale': return '状态过期 (进程可能已崩溃)'
+    default: return status.value.running ? '运行中' : '未运行'
+  }
+})
 
 async function refresh() {
   try {
@@ -160,12 +174,10 @@ async function refresh() {
       fetch(API_BASE + '/checkpoint').then(r => r.json()).catch(() => null),
     ])
 
-    if (statusRes) {
-      status.value = statusRes
-      if (statusRes.config) config.value = statusRes.config
-    }
-    if (statsRes && !statsRes.error) stats.value = statsRes
-    if (cpRes && !cpRes.error) checkpoint.value = cpRes
+    if (statusRes) status.value = statusRes
+    // /stats and /checkpoint return {} (empty object) when not_running — treat as no data.
+    if (statsRes && statsRes.source_events !== undefined) stats.value = statsRes
+    if (cpRes && cpRes.lsn) checkpoint.value = cpRes
   } catch {
     // silently ignore fetch errors
   }
@@ -214,11 +226,13 @@ h1 { font-size: 24px; color: #1a1a2e; margin-bottom: 4px; }
 }
 .status-card.running { background: linear-gradient(135deg, #52c41a, #73d13d); color: #fff; }
 .status-card.stopped { background: #f5f5f5; color: #666; }
+.status-card.halted { background: linear-gradient(135deg, #f5222d, #ff7875); color: #fff; }
+.status-card.stale { background: linear-gradient(135deg, #faad14, #ffc53d); color: #fff; }
 .status-indicator { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .status-dot { width: 12px; height: 12px; border-radius: 50%; background: #d9d9d9; }
 .status-dot.active { background: #fff; animation: pulse 2s infinite; }
 .status-text { font-size: 18px; font-weight: 600; }
-.status-meta { font-size: 13px; opacity: 0.8; }
+.status-meta { font-size: 13px; opacity: 0.85; }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
