@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/pg2tidb/pg2tidb-migrator/internal/cdc"
@@ -54,11 +55,19 @@ Prerequisites:
 		if cpFile == "" {
 			cpFile = ".cdc_checkpoint.json"
 		}
+		dataDir, _ := cmd.Flags().GetString("data-dir")
+		if dataDir == "" {
+			dataDir = ".pg2tidb"
+		}
 		statusFile, _ := cmd.Flags().GetString("status-file")
 		if statusFile == "" {
-			// CDC→Web status channel (#t48 B). Align with the web server's
-			// --cdc-status-file on same-machine deployments (same cwd or absolute path).
-			statusFile = "cdc/status.json"
+			// CDC→Web status channel (#t48 B). Default is <data-dir>/cdc/status.json
+			// (shared with the web server's --data). Log the resolved absolute path so
+			// a CDC/web cwd mismatch is VISIBLE, not a silent not_running.
+			statusFile = filepath.Join(dataDir, "cdc", "status.json")
+		}
+		if abs, err := filepath.Abs(statusFile); err == nil {
+			fmt.Fprintf(os.Stderr, "cdc status file (web must read this path): %s\n", abs)
 		}
 
 		// Build batch config
@@ -160,7 +169,8 @@ func init() {
 	cdcCmd.Flags().String("slot", "pg2tidb_cdc", "replication slot name")
 	cdcCmd.Flags().String("publication", "pg2tidb_pub", "publication name")
 	cdcCmd.Flags().String("checkpoint-file", ".cdc_checkpoint.json", "LSN checkpoint file path")
-	cdcCmd.Flags().String("status-file", "cdc/status.json", "CDC→Web status JSON path (web UI reads this; align with web --cdc-status-file on same-machine deployments — #t48 B)")
+	cdcCmd.Flags().String("data-dir", ".pg2tidb", "data directory shared with the web UI (CDC status file lives under <data-dir>/cdc/)")
+	cdcCmd.Flags().String("status-file", "", "CDC→Web status JSON path (defaults to <data-dir>/cdc/status.json; the web server must read the same path — #t48 B)")
 	cdcCmd.Flags().Int("batch-size", 1000, "max events per apply batch")
 	cdcCmd.Flags().Int("parallel", 1, "parallel apply workers (default 1=serial, correctness-first; >1 routes per-table but does NOT guarantee cross-table FK order / multi-table txn atomicity — see #t48 Bug#8)")
 	cdcCmd.Flags().String("conflict-strategy", "replace", "conflict resolution: replace, insert_ignore, upsert, skip")

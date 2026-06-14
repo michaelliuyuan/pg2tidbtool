@@ -12,9 +12,13 @@ shared path; the web reads it. True cross-machine (CDC on another node) is **v2*
 
 ## Status file
 
-- Path: configurable, default `cdc/status.json` (relative to each process's cwd).
-  Same-machine deployment must point CDC (`pg2tidb cdc --status-file`) and web
-  (`pg2tidb web --cdc-status-file`) at the **same path** (same cwd or absolute).
+- Path: configurable, default `<data-dir>/cdc/status.json`. CDC (`--data-dir`,
+  default `.pg2tidb`) and web (`--data`, default `.pg2tidb`) **share the data
+  dir**, so both default to the same path when run from the same cwd. Both log
+  the resolved **absolute** path at startup, so a CDC/web cwd mismatch is
+  **visible** (not a silent always-`not_running`). Production with separate cwds:
+  point both `--data-dir`/`--data` (or the `--status-file`/`--cdc-status-file`
+  flags) at the same absolute path.
 - **Atomic write** (temp + rename) — readers never see a half-written file.
 - Cadence: rides CDC's checkpoint ticker (~10s) + a final write on shutdown. No
   extra lifecycle/goroutine.
