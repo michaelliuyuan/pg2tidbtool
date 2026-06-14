@@ -777,7 +777,7 @@ cd web/frontend && npm run dev
 A: PostgreSQL 10+ 版本。
 
 **Q: 支持增量同步吗？**
-A: 当前版本仅支持全量迁移，增量能力已预留接口，后续版本支持。
+A: 支持。CDC 增量同步（PG logical replication → TiDB）通过 `pg2tidb cdc` 命令运行，覆盖 INSERT/UPDATE/DELETE、事务顺序性、NULL/特殊字符/TOAST；带 checkpoint-on-failure 防丢数据（at-least-once 重启重读）+ 无 PK 表结构性 halt。Web 端有只读 CDC 监控仪表盘（`pg2tidb web`，读 CDC 状态文件，见 [docs/cdc-web-monitoring-contract.md](docs/cdc-web-monitoring-contract.md)）。
 
 **Q: 大表迁移性能如何？**
 A: PG 导出通常 50-200 MB/s，TiDB Lightning 导入 200-500 MB/s，整体瓶颈通常在 PG 导出端。
