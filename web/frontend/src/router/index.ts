@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import CDCView from '../views/CDCView.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -35,7 +36,10 @@ const router = createRouter({
     {
       path: '/cdc',
       name: 'CDC',
-      component: () => import('../views/CDCView.vue'),
+      // Static import (not lazy) so CDCView is bundled into the main chunk — a
+      // separate CDCView-*.js chunk can 404 behind an inconsistent static-dir /
+      // cache layer and leave the route blank. See #t48.
+      component: CDCView,
     },
   ],
 })
