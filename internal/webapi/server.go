@@ -38,6 +38,9 @@ type Server struct {
 	hub          *Hub
 	dataDir      string
 
+	// CDC status provider (#t48 B): reads the CDC process's status file.
+	cdcProvider cdcStatusProvider
+
 	// running tasks
 	runningTasks map[string]context.CancelFunc
 
@@ -124,8 +127,10 @@ func NewServer(store *store.Store, host string, port int, dataDir string, static
 		})
 		r.Get("/ws", s.handleWebSocket)
 			r.Post("/assess", s.handleAssess)
-			// CDC endpoints
+			// CDC endpoints (#t48 B: read CDC process status file)
 			r.Get("/cdc/status", s.handleCDCStatus)
+			r.Get("/cdc/stats", s.handleCDCStats)
+			r.Get("/cdc/checkpoint", s.handleCDCCheckpoint)
 	})
 
 	if staticFS != (embed.FS{}) {

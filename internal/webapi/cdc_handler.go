@@ -1,66 +1,147 @@
 package webapi
 
 import (
-	"encoding/json"
 	"net/http"
+	"time"
+
+	"github.com/pg2tidb/pg2tidb-migrator/internal/cdc"
 )
 
-// CDCStatusResponse is returned by the CDC status API endpoint.
+// CDCStatusResponse is returned by GET /api/v1/cdc/status.
 type CDCStatusResponse struct {
-	Available bool   `json:"available"`
-	Running   bool   `json:"running"`
-	Message   string `json:"message,omitempty"`
+	Available     bool    `json:"available"`
+	Running       bool    `json:"running"`
+	State         string  `json:"state"` // not_running | running | stale | halted
+	Message       string  `json:"message,omitempty"`
+	LSN           string  `json:"lsn,omitempty"`
+	Slot          string  `json:"slot,omitempty"`
+	Publication   string  `json:"publication,omitempty"`
+	PID           int     `json:"pid,omitempty"`
+	UptimeSeconds float64 `json:"uptime_seconds,omitempty"`
+	FatalError    string  `json:"fatal_error,omitempty"`
 }
 
-// cdcStateReader is an interface for reading CDC state.
-// Implemented by cdc.CDCAPI or a mock.
-type cdcStateReader interface {
-	ReadStatus() (running bool, lsn string, err error)
+// cdcStatusView is the web's computed view of the CDC process, read from the
+// status file. Liveness is computed via timestamp freshness, NOT the
+// self-reported state. Contract: docs/cdc-web-monitoring-contract.md (#t48 B).
+type cdcStatusView struct {
+	State         string // not_running | running | stale | halted
+	Running       bool
+	LSN           string
+	Slot          string
+	Publication   string
+	PID           int
+	UptimeSeconds float64
+	FatalError    string
+	Stats         *cdc.CDCStatusStats   // nil when there is no status file
+	Checkpoint    *cdc.CDCStatusCheckpoint
 }
 
-// defaultCDCReader provides a no-op CDC state reader when CDC is not running.
-type defaultCDCReader struct{}
-
-func (r *defaultCDCReader) ReadStatus() (bool, string, error) {
-	return false, "", nil
+// cdcStatusProvider abstracts how the web reads CDC state (a file reader by
+// default; a mock in tests).
+type cdcStatusProvider interface {
+	StatusView() cdcStatusView
 }
 
-// SetCDCStateReader sets the CDC state reader for status queries.
-var cdcReader cdcStateReader = &defaultCDCReader{}
-
-// SetCDCReader replaces the current CDC state reader (called from main or orchestrator).
-func SetCDCReader(r cdcStateReader) {
-	cdcReader = r
+// fileCDCStatusProvider reads the CDC status JSON and computes liveness.
+type fileCDCStatusProvider struct {
+	path           string
+	staleThreshold time.Duration
+	pidAlive       func(int) bool
 }
 
-// handleCDCStatus handles GET /api/v1/cdc/status
-func (s *Server) handleCDCStatus(w http.ResponseWriter, r *http.Request) {
-	running, lsn, err := cdcReader.ReadStatus()
+// NewFileCDCStatusProvider builds a provider that reads the CDC status file.
+func NewFileCDCStatusProvider(path string, staleThreshold time.Duration) *fileCDCStatusProvider {
+	return &fileCDCStatusProvider{path: path, staleThreshold: staleThreshold, pidAlive: pidAlive}
+}
+
+func (p *fileCDCStatusProvider) StatusView() cdcStatusView {
+	st, err := cdc.ReadStatusFile(p.path)
 	if err != nil {
-		s.writeJSON(w, http.StatusOK, CDCStatusResponse{
-			Available: true,
-			Running:   false,
-			Message:   err.Error(),
-		})
-		return
+		// Missing / unreadable / unparseable => not_running (never a 500).
+		return cdcStatusView{State: string(cdc.LivenessNotRunning)}
 	}
+	live := cdc.ComputeLiveness(st, time.Now(), p.staleThreshold, p.pidAlive)
+	stats := st.Stats
+	cp := st.Checkpoint
+	return cdcStatusView{
+		State:         string(live),
+		Running:       live == cdc.LivenessRunning,
+		LSN:           st.LSN,
+		Slot:          st.Slot,
+		Publication:   st.Publication,
+		PID:           st.PID,
+		UptimeSeconds: stats.UptimeSeconds,
+		FatalError:    st.FatalError,
+		Stats:         &stats,
+		Checkpoint:    &cp,
+	}
+}
 
+// SetCDCStatusProvider wires the CDC status provider (called from cmd/web).
+func (s *Server) SetCDCStatusProvider(p cdcStatusProvider) {
+	s.cdcProvider = p
+}
+
+// cdcStatus returns the current CDC view via the configured provider (defaults
+// to not_running when no provider is wired).
+func (s *Server) cdcStatus() cdcStatusView {
+	if s.cdcProvider == nil {
+		return cdcStatusView{State: string(cdc.LivenessNotRunning)}
+	}
+	return s.cdcProvider.StatusView()
+}
+
+func cdcMessage(v cdcStatusView) string {
+	switch v.State {
+	case string(cdc.LivenessRunning):
+		return "CDC running (LSN: " + v.LSN + ")"
+	case string(cdc.LivenessHalted):
+		if v.FatalError != "" {
+			return "CDC halted: " + v.FatalError
+		}
+		return "CDC halted"
+	case string(cdc.LivenessStale):
+		return "CDC status is stale — the process may have crashed; showing last-known state. Check the process/logs."
+	default:
+		return "CDC not running. Start with: pg2tidb cdc"
+	}
+}
+
+// handleCDCStatus handles GET /api/v1/cdc/status.
+func (s *Server) handleCDCStatus(w http.ResponseWriter, r *http.Request) {
+	v := s.cdcStatus()
 	resp := CDCStatusResponse{
-		Available: true,
-		Running:   running,
+		Available:     true,
+		Running:       v.Running,
+		State:         v.State,
+		Message:       cdcMessage(v),
+		LSN:           v.LSN,
+		Slot:          v.Slot,
+		Publication:   v.Publication,
+		PID:           v.PID,
+		UptimeSeconds: v.UptimeSeconds,
+		FatalError:    v.FatalError,
 	}
-	if running {
-		resp.Message = "LSN: " + lsn
-	} else {
-		resp.Message = "CDC not running. Start with: pg2tidb cdc"
-	}
-
 	s.writeJSON(w, http.StatusOK, resp)
 }
 
-// writeJSON is a helper for JSON responses (used by cdc_handler).
-func writeCDCJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+// handleCDCStats handles GET /api/v1/cdc/stats (last-known stats; empty when not_running).
+func (s *Server) handleCDCStats(w http.ResponseWriter, r *http.Request) {
+	v := s.cdcStatus()
+	if v.Stats == nil {
+		s.writeJSON(w, http.StatusOK, struct{}{})
+		return
+	}
+	s.writeJSON(w, http.StatusOK, v.Stats)
+}
+
+// handleCDCCheckpoint handles GET /api/v1/cdc/checkpoint.
+func (s *Server) handleCDCCheckpoint(w http.ResponseWriter, r *http.Request) {
+	v := s.cdcStatus()
+	if v.Checkpoint == nil {
+		s.writeJSON(w, http.StatusOK, struct{}{})
+		return
+	}
+	s.writeJSON(w, http.StatusOK, v.Checkpoint)
 }
