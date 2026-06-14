@@ -27,6 +27,9 @@ type Runner struct {
 	filter      *TableFilter
 	ddlTracker  *DDLTracker
 
+	statusFile string    // CDC→Web status JSON path (#t48 B); empty = disabled
+	startTime  time.Time // for uptime in the status report
+
 	log *zap.Logger
 }
 
@@ -42,6 +45,11 @@ type RunnerConfig struct {
 
 	// Checkpoint file path
 	CheckpointFile string
+
+	// StatusFile is the path the CDC process writes its status JSON to for the
+	// web UI to read (CDC→Web cross-process channel, #t48 B). Empty = disabled.
+	// Same-machine deployment must align this with the web server's read path.
+	StatusFile string
 
 	// Enable DDL tracking
 	EnableDDLTracking bool
@@ -59,10 +67,11 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	}
 
 	r := &Runner{
-		srcCfg:    cfg.Source,
-		batchCfg:  cfg.Batch,
-		targetDSN: cfg.TargetDSN,
-		log:       log,
+		srcCfg:     cfg.Source,
+		batchCfg:   cfg.Batch,
+		targetDSN:  cfg.TargetDSN,
+		statusFile: cfg.StatusFile,
+		log:        log,
 	}
 
 	// Create components
@@ -93,6 +102,7 @@ func (r *Runner) SetLogger(log *zap.Logger) {
 // Run executes the full CDC pipeline.
 func (r *Runner) Run(ctx context.Context) error {
 	r.log.Info("cdc runner: starting")
+	r.startTime = time.Now()
 
 	// Load checkpoint for resume
 	cp, err := r.checkpoint.Load()
@@ -168,6 +178,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			if saveErr := r.checkpoint.Save(); saveErr != nil {
 				r.log.Error("cdc runner: final checkpoint save failed", zap.Error(saveErr))
 			}
+			r.writeStatus() // final status: state=halted if source fatal (Part A)
 			r.source.Stop()
 			if srcErr != nil {
 				return fmt.Errorf("cdc runner: source halted on fatal: %w", srcErr)
@@ -191,6 +202,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			if saveErr := r.checkpoint.Save(); saveErr != nil {
 				r.log.Error("cdc runner: final checkpoint save failed", zap.Error(saveErr))
 			}
+			r.writeStatus() // final status on graceful shutdown
 			return nil
 
 		case <-cpTicker.C:
@@ -200,11 +212,64 @@ func (r *Runner) Run(ctx context.Context) error {
 					r.log.Error("cdc runner: checkpoint save failed", zap.Error(saveErr))
 				}
 			}
+			r.writeStatus() // ride the checkpoint ticker (~10s) — #t48 B cadence
 
 		case <-ctx.Done():
 			r.source.Stop()
 			return ctx.Err()
 		}
+	}
+}
+
+// writeStatus writes the CDC→Web status JSON (best-effort; errors are logged,
+// not fatal). Rides the checkpoint ticker + shutdown so it adds no goroutine or
+// lifecycle of its own. state/fatal_error reflect Part A's setFatal so the web
+// can show a halt even while the file is still fresh. #t48 B contract.
+func (r *Runner) writeStatus() {
+	if r.statusFile == "" {
+		return
+	}
+	var stats CDCStatusStats
+	if r.applier != nil {
+		as := r.applier.Stats()
+		stats = CDCStatusStats{
+			Applied:   as.EventsApplied,
+			Failed:    as.EventsFailed,
+			Skipped:   as.EventsSkipped,
+			Batches:   as.BatchesFlushed,
+			LastError: as.LastError,
+		}
+	}
+	stats.SourceEvents = r.source.EventsReceived()
+	if !r.startTime.IsZero() {
+		stats.UptimeSeconds = time.Since(r.startTime).Seconds()
+	}
+
+	state := CDCSelfRunning
+	fatal := ""
+	if srcErr := r.source.Err(); srcErr != nil {
+		state = CDCSelfHalted
+		fatal = srcErr.Error()
+	}
+
+	cp := r.checkpoint.GetCheckpoint()
+	st := CDCStatusFile{
+		Schema:      1,
+		Timestamp:   time.Now(),
+		PID:         os.Getpid(),
+		Slot:        r.srcCfg.SlotName,
+		Publication: r.srcCfg.Publication,
+		LSN:         r.source.CurrentLSN().String(),
+		State:       state,
+		FatalError:  fatal,
+		Stats:       stats,
+		Checkpoint: CDCStatusCheckpoint{
+			LSN:       cp.LSN.String(),
+			UpdatedAt: cp.Timestamp,
+		},
+	}
+	if err := WriteStatusFile(r.statusFile, st); err != nil {
+		r.log.Warn("cdc runner: write status file failed", zap.Error(err))
 	}
 }
 
