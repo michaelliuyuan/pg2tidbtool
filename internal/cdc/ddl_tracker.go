@@ -13,8 +13,8 @@ import (
 // DDLTracker monitors PG DDL changes and transforms them for TiDB.
 // It uses PG's event trigger facility to capture DDL statements.
 type DDLTracker struct {
-	db   *sql.DB
-	log  *zap.Logger
+	db  *sql.DB
+	log *zap.Logger
 
 	mu        sync.Mutex
 	ddlLog    []DDLEntry
@@ -24,12 +24,12 @@ type DDLTracker struct {
 
 // DDLEntry records a captured DDL statement.
 type DDLEntry struct {
-	LSN       string `json:"lsn"`
-	Schema    string `json:"schema"`
+	LSN        string `json:"lsn"`
+	Schema     string `json:"schema"`
 	ObjectName string `json:"object_name"`
 	ObjectType string `json:"object_type"` // TABLE, INDEX, VIEW, FUNCTION, etc.
-	DDL       string `json:"ddl"`
-	TiDBDDL   string `json:"tidb_ddl,omitempty"`
+	DDL        string `json:"ddl"`
+	TiDBDDL    string `json:"tidb_ddl,omitempty"`
 }
 
 // DDLTransformer converts PG DDL statements to TiDB-compatible DDL.
@@ -199,6 +199,11 @@ func (dt *DDLTransformer) Transform(ddl string, objectType string) string {
 }
 
 func (dt *DDLTransformer) transformTableDDL(ddl string) string {
+	// Cheap at-least-once idempotency (#t59 §4.2): CREATE/DROP get IF NOT
+	// EXISTS / IF EXISTS so a replayed DDL doesn't error. ALTER is not
+	// idempotent and relies on the ddl_log.id checkpoint to avoid replay
+	// (a crash-window replay that errors → halt, not silently masked).
+	ddl = makeDDLIdempotent(ddl)
 	upper := strings.ToUpper(ddl)
 
 	// Replace PG-specific types
@@ -218,7 +223,7 @@ func (dt *DDLTransformer) transformTableDDL(ddl string) string {
 	ddl = strings.ReplaceAll(ddl, "MONEY", "DECIMAL(19,2)")
 
 	// Replace PG-specific syntax
-	ddl = strings.ReplaceAll(ddl, "IF NOT EXISTS", "IF NOT EXISTS") // same
+	ddl = strings.ReplaceAll(ddl, "IF NOT EXISTS", "IF NOT EXISTS")         // same
 	ddl = strings.ReplaceAll(ddl, "ON DELETE CASCADE", "ON DELETE CASCADE") // same
 
 	// Replace PG-only USING clauses in index creation
@@ -273,4 +278,20 @@ func (dt *DDLTransformer) transformFunctionDDL(ddl string) string {
 func (dt *DDLTransformer) transformTriggerDDL(ddl string) string {
 	// Basic trigger transformation: plpgsql → application logic comment
 	return "-- Trigger needs conversion to application logic for TiDB:\n-- " + ddl
+}
+
+// makeDDLIdempotent rewrites a CREATE/DROP TABLE statement to be safely
+// replayable (IF NOT EXISTS / IF EXISTS) for at-least-once DDL apply (#t59 §4.2).
+// Statements already carrying the guard, and non-CREATE/DROP DDL (ALTER), are
+// returned unchanged — ALTER is not cheaply idempotent and relies on the
+// ddl_log.id checkpoint to avoid replay.
+func makeDDLIdempotent(ddl string) string {
+	upper := strings.ToUpper(ddl)
+	if idx := strings.Index(upper, "CREATE TABLE"); idx >= 0 && !strings.Contains(upper, "IF NOT EXISTS") {
+		return ddl[:idx] + "CREATE TABLE IF NOT EXISTS" + ddl[idx+len("CREATE TABLE"):]
+	}
+	if idx := strings.Index(upper, "DROP TABLE"); idx >= 0 && !strings.Contains(upper, "IF EXISTS") {
+		return ddl[:idx] + "DROP TABLE IF EXISTS" + ddl[idx+len("DROP TABLE"):]
+	}
+	return ddl
 }

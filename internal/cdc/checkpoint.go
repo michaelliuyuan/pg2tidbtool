@@ -138,3 +138,18 @@ func (c *CheckpointManager) SetSlotName(name string) {
 	defer c.mu.Unlock()
 	c.checkpoint.SlotName = name
 }
+
+// GetLastDDLID returns the last applied DDL log id (DDL replication resume, #t59).
+func (c *CheckpointManager) GetLastDDLID() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.checkpoint.LastDDLID
+}
+
+// SetLastDDLID records the last applied DDL log id and marks the checkpoint dirty.
+func (c *CheckpointManager) SetLastDDLID(id int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.checkpoint.LastDDLID = id
+	c.dirty = true
+}

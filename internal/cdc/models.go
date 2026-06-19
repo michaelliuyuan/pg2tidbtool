@@ -12,10 +12,10 @@ import (
 type EventKind string
 
 const (
-	EventInsert EventKind = "insert"
-	EventUpdate EventKind = "update"
-	EventDelete EventKind = "delete"
-	EventDDL    EventKind = "ddl"
+	EventInsert   EventKind = "insert"
+	EventUpdate   EventKind = "update"
+	EventDelete   EventKind = "delete"
+	EventDDL      EventKind = "ddl"
 	EventTruncate EventKind = "truncate"
 )
 
@@ -27,18 +27,18 @@ type CDCEvent struct {
 	Kind       EventKind     `json:"kind"`
 	Schema     string        `json:"schema"`
 	Table      string        `json:"table"`
-	Columns    []ColumnValue `json:"columns,omitempty"`    // INSERT / UPDATE / DELETE
+	Columns    []ColumnValue `json:"columns,omitempty"`     // INSERT / UPDATE / DELETE
 	OldColumns []ColumnValue `json:"old_columns,omitempty"` // UPDATE old values
-	DDL        string        `json:"ddl,omitempty"`        // DDL statement text
-	RawData    []byte        `json:"-"`                    // raw pgoutput message (for replay)
+	DDL        string        `json:"ddl,omitempty"`         // DDL statement text
+	RawData    []byte        `json:"-"`                     // raw pgoutput message (for replay)
 }
 
 // ColumnValue is a single column name/value pair in a CDC event.
 type ColumnValue struct {
 	Name      string      `json:"name"`
 	Value     interface{} `json:"value"`
-	Type      string      `json:"type"`              // PG data type OID string
-	IsKey     bool        `json:"is_key,omitempty"`  // part of the relation PK / replica identity (from RelationMessage KeyColumn flag)
+	Type      string      `json:"type"`                // PG data type OID string
+	IsKey     bool        `json:"is_key,omitempty"`    // part of the relation PK / replica identity (from RelationMessage KeyColumn flag)
 	Unchanged bool        `json:"unchanged,omitempty"` // pgoutput 'u': unchanged TOASTed value, not sent — must never be rendered as a literal
 }
 
@@ -47,6 +47,10 @@ type Checkpoint struct {
 	LSN       pglogrepl.LSN `json:"lsn"`
 	Timestamp time.Time     `json:"timestamp"`
 	SlotName  string        `json:"slot_name"`
+	// LastDDLID is the last applied pg2tidb_ddl_log.id (DDL replication resume,
+	// #t59). At-least-once: on restart, DDL poll resumes from here so already-
+	// applied DDL isn't replayed.
+	LastDDLID int64 `json:"last_ddl_id,omitempty"`
 }
 
 // SourceConfig configures the PG logical replication source.
@@ -95,7 +99,7 @@ type TransformerConfig struct {
 // DefaultTransformerConfig returns sensible defaults.
 func DefaultTransformerConfig() TransformerConfig {
 	return TransformerConfig{
-		IncludeOldValues:    true,
+		IncludeOldValues:     true,
 		MaxColumnValueLength: 0,
 	}
 }
