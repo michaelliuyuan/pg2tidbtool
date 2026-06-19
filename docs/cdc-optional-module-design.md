@@ -1,6 +1,6 @@
 # PG2TiDB CDC 增量同步 — 改为「可选功能模块」设计方案
 
-> 状态：决策已确认（@刘源 2026-06-19），开发启动中
+> 状态：决策已确认（@刘源 2026-06-19）；D1（#t51）已合并上 main，D2/D3 进行中
 > 负责人：@架构师（设计）→ @开发工程师（开发）/ @测试工程师（测试）
 > 关联：`docs/cdc-architecture.md`（CDC 模块本身架构，本文件只讲「可选化」改造）
 > 基线：以代码为准（`internal/common/config/config.go`、`cmd/cdc.go`、`cmd/all.go`、`internal/webapi/server.go`、`internal/cdc/`），设计文档状态标注可能滞后。
@@ -129,6 +129,8 @@ CDC: CDCConfig{
     CheckpointFile:   ".cdc_checkpoint.json",
 },
 ```
+
+> **Parallel 默认值（2026-06-19 定）**：取 `1`（D1 #t51 已实现）。契合 §3.3「默认安全」+ 与 origin/main `c41b567`（#t48 Bug#8）落地一致。Bug#8 根因：applier 多 worker 共享 channel 致同表同行事件乱序、丢更新；`c41b567` 用 per-worker channel + FNV-1a 按表固定路由（同表串行、跨表并行）修复，并把默认 4→1。partition 修复后 `>1` 也正确（经测试工程师干净环境实测），故 `>1` 是安全的吞吐 opt-in——要吞吐的用户显式调高即可，默认 1 是保守项，非正确性限制。
 
 **`Validate()` 增补**（仅在启用时校验 CDC 专属参数）：
 
