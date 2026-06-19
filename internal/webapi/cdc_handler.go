@@ -141,6 +141,10 @@ func (s *Server) handleCDCStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleCDCStats handles GET /api/v1/cdc/stats (last-known stats; empty when not_running).
 func (s *Server) handleCDCStats(w http.ResponseWriter, r *http.Request) {
+	if !s.cdcEnabled {
+		s.writeJSON(w, http.StatusOK, struct{}{})
+		return
+	}
 	v := s.cdcStatus()
 	if v.Stats == nil {
 		s.writeJSON(w, http.StatusOK, struct{}{})
@@ -151,6 +155,10 @@ func (s *Server) handleCDCStats(w http.ResponseWriter, r *http.Request) {
 
 // handleCDCCheckpoint handles GET /api/v1/cdc/checkpoint.
 func (s *Server) handleCDCCheckpoint(w http.ResponseWriter, r *http.Request) {
+	if !s.cdcEnabled {
+		s.writeJSON(w, http.StatusOK, struct{}{})
+		return
+	}
 	v := s.cdcStatus()
 	if v.Checkpoint == nil {
 		s.writeJSON(w, http.StatusOK, struct{}{})
