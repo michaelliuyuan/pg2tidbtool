@@ -25,14 +25,15 @@
     </div>
 
     <!-- Status Card -->
-    <div class="status-card" :class="statusState">
+    <div class="status-card" :class="cardState">
       <div class="status-indicator">
-        <span class="status-dot" :class="{ active: status.running }"></span>
-        <span class="status-text">{{ statusLabel }}</span>
+        <span class="status-dot" :class="{ active: status.running || inStartup }"></span>
+        <span class="status-text">{{ cardLabel }}</span>
       </div>
       <div class="status-meta">
         <span v-if="status.running && status.lsn">LSN: {{ status.lsn }}</span>
-        <span v-else>{{ status.message || 'CDC 未运行，使用 pg2tidb cdc 命令启动' }}</span>
+        <span v-else-if="inStartup">CDC 启动中…（control 通道确认运行，等待 CDC 连接 PG/TiDB 写首条状态，约 8-90s）</span>
+        <span v-else>{{ status.message || 'CDC 未运行，点上方「启动 CDC」开始' }}</span>
       </div>
       <div class="status-meta" v-if="status.fatal_error" style="color: #fff; opacity: 0.95;">
         ⚠️ {{ status.fatal_error }}
@@ -227,6 +228,14 @@ const startLabel = computed(() => {
   return controlState.value === 'failed' ? '重新启动 CDC' : '启动 CDC'
 })
 
+// Startup-window polish (#t55): the supervisor (control channel) knows CDC is
+// running before the READ channel (status file) gets its first write — ~8-90s
+// while CDC connects to PG/TiDB + creates the replication slot. During that
+// window, show "启动中" instead of a misleading stale/未运行.
+const inStartup = computed(() => isActive.value && !status.value.running)
+const cardState = computed(() => (inStartup.value ? 'starting' : statusState.value))
+const cardLabel = computed(() => (inStartup.value ? '启动中…（control 通道确认运行）' : statusLabel.value))
+
 async function callCDC(action: 'start' | 'stop') {
   busy.value = true
   controlMsg.value = ''
@@ -321,6 +330,7 @@ h1 { font-size: 24px; color: #1a1a2e; margin-bottom: 4px; }
   box-shadow: 0 2px 8px rgba(0,0,0,0.08);
 }
 .status-card.running { background: linear-gradient(135deg, #52c41a, #73d13d); color: #fff; }
+.status-card.starting { background: linear-gradient(135deg, #1890ff, #69b1ff); color: #fff; }
 .status-card.stopped { background: #f5f5f5; color: #666; }
 .status-card.halted { background: linear-gradient(135deg, #f5222d, #ff7875); color: #fff; }
 .status-card.stale { background: linear-gradient(135deg, #faad14, #ffc53d); color: #fff; }
