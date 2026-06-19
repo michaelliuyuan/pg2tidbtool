@@ -11,6 +11,7 @@ import (
 	"github.com/pg2tidb/pg2tidb-migrator/internal/store"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/webapi"
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 )
 
 var (
@@ -48,11 +49,9 @@ Default URL: http://localhost:8080`,
 			return fmt.Errorf("load config: %w", err)
 		}
 
-		srv := webapi.NewServer(s, webHost, webPort, dataDir, StaticFS, cfg.CDC.Enable)
-		// CDC dashboard (#t48 B): read the CDC process's status file. Default is
-		// <data-dir>/cdc/status.json (shared with CDC's --data-dir). Log the
-		// resolved absolute path so a CDC/web cwd mismatch is VISIBLE, not a
-		// silent always-not_running.
+		// CDC status file (READ channel) — resolved before NewServer so the
+		// supervisor (#t55) can spawn the CDC child with the matching
+		// --status-file, and so a CDC/web cwd mismatch is VISIBLE.
 		statusFile := cdcStatusFile
 		if statusFile == "" {
 			statusFile = filepath.Join(dataDir, "cdc", "status.json")
@@ -60,6 +59,12 @@ Default URL: http://localhost:8080`,
 		if abs, err := filepath.Abs(statusFile); err == nil {
 			fmt.Fprintf(os.Stderr, "cdc status file (dashboard reads): %s\n", abs)
 		}
+
+		// CDC control supervisor (#t55): spawn / supervise / restart / stop the
+		// CDC child on behalf of the Web UI (CONTROL channel).
+		bin, _ := os.Executable()
+		cdcSup := webapi.NewCDCSupervisor(cfg.CDC, bin, cfgFile, statusFile, zap.L())
+		srv := webapi.NewServer(s, webHost, webPort, dataDir, StaticFS, cdcSup, statusFile, time.Duration(cdcStaleSec)*time.Second)
 		srv.SetCDCStatusProvider(webapi.NewFileCDCStatusProvider(statusFile, time.Duration(cdcStaleSec)*time.Second))
 		fmt.Fprintf(os.Stderr, "pg2tidb web UI: http://%s:%d\n", webHost, webPort)
 		return srv.Start()

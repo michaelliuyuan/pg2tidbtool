@@ -1,6 +1,7 @@
 package webapi
 
 import (
+	"errors"
 	"net/http"
 	"time"
 
@@ -20,6 +21,10 @@ type CDCStatusResponse struct {
 	PID           int     `json:"pid,omitempty"`
 	UptimeSeconds float64 `json:"uptime_seconds,omitempty"`
 	FatalError    string  `json:"fatal_error,omitempty"`
+
+	// Control is the supervisor's lifecycle view (CONTROL channel, #t55):
+	// state/pid/restarts/uptime/adopted. Omitted when CDC control isn't wired.
+	Control *CDCControlStatus `json:"control,omitempty"`
 }
 
 // cdcStatusView is the web's computed view of the CDC process, read from the
@@ -136,7 +141,50 @@ func (s *Server) handleCDCStatus(w http.ResponseWriter, r *http.Request) {
 		UptimeSeconds: v.UptimeSeconds,
 		FatalError:    v.FatalError,
 	}
+	if s.cdcSupervisor != nil {
+		cs := s.cdcSupervisor.Status()
+		resp.Control = &cs
+	}
 	s.writeJSON(w, http.StatusOK, resp)
+}
+
+// handleCDCStart starts the CDC child via the supervisor (CONTROL channel, #t55).
+// Idempotent. Returns 409 + guidance when cdc.enable is false (does not bypass #t50).
+func (s *Server) handleCDCStart(w http.ResponseWriter, r *http.Request) {
+	if s.cdcSupervisor == nil {
+		s.writeJSON(w, http.StatusConflict, map[string]interface{}{
+			"ok": false, "state": "disabled", "message": "CDC control is not wired on this server.",
+		})
+		return
+	}
+	st, err := s.cdcSupervisor.Start(r.Context())
+	if errors.Is(err, ErrCDCDisabled) {
+		s.writeJSON(w, http.StatusConflict, map[string]interface{}{
+			"ok": false, "state": "disabled", "message": "CDC module disabled. Set cdc.enable: true first.",
+		})
+		return
+	}
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, "start cdc: "+err.Error())
+		return
+	}
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok": true, "state": string(st.State), "pid": st.PID, "message": "CDC started",
+	})
+}
+
+// handleCDCStop gracefully stops the CDC child (CONTROL channel, #t55). Idempotent.
+func (s *Server) handleCDCStop(w http.ResponseWriter, r *http.Request) {
+	if s.cdcSupervisor == nil {
+		s.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"ok": true, "state": "stopped", "message": "CDC control is not wired on this server.",
+		})
+		return
+	}
+	st := s.cdcSupervisor.Stop(r.Context())
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok": true, "state": string(st.State), "pid": st.PID, "message": "CDC stopped",
+	})
 }
 
 // handleCDCStats handles GET /api/v1/cdc/stats (last-known stats; empty when not_running).

@@ -45,6 +45,10 @@ type Server struct {
 	// hidden by the frontend and /cdc/status reports a stable disabled state.
 	cdcEnabled bool
 
+	// cdcSupervisor owns the CDC child lifecycle (CONTROL channel, #t55): spawn /
+	// supervise / restart / stop / adopt. nil when CDC control is not wired.
+	cdcSupervisor *CDCSupervisor
+
 	// running tasks
 	runningTasks map[string]context.CancelFunc
 
@@ -88,16 +92,27 @@ func (h *Hub) Run() {
 	}
 }
 
-func NewServer(store *store.Store, host string, port int, dataDir string, staticFS embed.FS, cdcEnabled bool) *Server {
+func NewServer(store *store.Store, host string, port int, dataDir string, staticFS embed.FS, cdcSupervisor *CDCSupervisor, cdcStatusFile string, cdcStale time.Duration) *Server {
+	cdcEnabled := false
+	if cdcSupervisor != nil {
+		cdcEnabled = cdcSupervisor.cfg.Enable
+	}
 	s := &Server{
-		store:        store,
-		addr:         fmt.Sprintf("%s:%d", host, port),
-		hub:          newHub(),
-		runningTasks: make(map[string]context.CancelFunc),
-		dataDir:      dataDir,
-		logCollector: NewLogCollector(),
-		logCores:     make(map[string]*TaskLogCore),
-		cdcEnabled:   cdcEnabled,
+		store:         store,
+		addr:          fmt.Sprintf("%s:%d", host, port),
+		hub:           newHub(),
+		runningTasks:  make(map[string]context.CancelFunc),
+		dataDir:       dataDir,
+		logCollector:  NewLogCollector(),
+		logCores:      make(map[string]*TaskLogCore),
+		cdcEnabled:    cdcEnabled,
+		cdcSupervisor: cdcSupervisor,
+	}
+
+	// Adopt any CDC already running before this web start (locked decision:
+	// 领养监控 — detect via status file + PID, no zombie/duplicate).
+	if cdcSupervisor != nil {
+		cdcSupervisor.Adopt(cdcStatusFile, cdcStale, pidAlive)
 	}
 
 	r := chi.NewRouter()
@@ -137,6 +152,8 @@ func NewServer(store *store.Store, host string, port int, dataDir string, static
 		r.Get("/cdc/status", s.handleCDCStatus)
 		r.Get("/cdc/stats", s.handleCDCStats)
 		r.Get("/cdc/checkpoint", s.handleCDCCheckpoint)
+		r.Post("/cdc/start", s.handleCDCStart)
+		r.Post("/cdc/stop", s.handleCDCStop)
 	})
 
 	if staticFS != (embed.FS{}) {
