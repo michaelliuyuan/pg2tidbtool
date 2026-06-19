@@ -11,6 +11,19 @@
     </div>
 
     <template v-else>
+    <!-- Control panel: one-click start/stop (#t55) -->
+    <div class="control-card">
+      <div class="control-head">
+        <span class="control-badge" :class="controlState">{{ controlLabel }}</span>
+        <span v-if="control && control.restarts > 0" class="control-restarts">自动重启 {{ control.restarts }} 次</span>
+      </div>
+      <div class="control-actions">
+        <button class="btn-start" :disabled="busy || isActive" @click="startCDC">{{ startLabel }}</button>
+        <button class="btn-stop" :disabled="busy || !canStop" @click="confirmStopCDC">停止 CDC</button>
+      </div>
+      <div v-if="controlMsg" class="control-msg" :class="{ error: controlError }">{{ controlMsg }}</div>
+    </div>
+
     <!-- Status Card -->
     <div class="status-card" :class="statusState">
       <div class="status-indicator">
@@ -133,6 +146,16 @@ interface CDCStatus {
   pid?: number
   uptime_seconds?: number
   fatal_error?: string
+  control?: CDCControl
+}
+
+// CDCSupervisor control view (#t55 CONTROL channel).
+interface CDCControl {
+  state: string // stopped|starting|running|stopping|failed|adopted
+  pid: number
+  restarts: number
+  uptime_seconds: number
+  adopted: boolean
 }
 
 interface CDCStats {
@@ -180,10 +203,65 @@ const statusLabel = computed(() => {
 // replaced by a notice and polling stops (D3 #t53).
 const disabled = computed(() => status.value.enabled === false)
 
+// One-click start/stop (CONTROL channel, #t55).
+const control = ref<CDCControl | null>(null)
+const busy = ref(false)
+const controlMsg = ref('')
+const controlError = ref(false)
+
+const controlState = computed(() => control.value?.state || 'stopped')
+const isActive = computed(() => ['running', 'starting', 'adopted'].includes(controlState.value))
+const canStop = computed(() => ['running', 'starting', 'adopted'].includes(controlState.value))
+const controlLabel = computed(() => {
+  switch (controlState.value) {
+    case 'running': return '运行中'
+    case 'starting': return '启动中…'
+    case 'stopping': return '停止中…'
+    case 'failed': return '已失败（崩溃超限）'
+    case 'adopted': return '运行中（领养）'
+    default: return '未启动'
+  }
+})
+const startLabel = computed(() => {
+  if (busy.value) return '处理中…'
+  return controlState.value === 'failed' ? '重新启动 CDC' : '启动 CDC'
+})
+
+async function callCDC(action: 'start' | 'stop') {
+  busy.value = true
+  controlMsg.value = ''
+  controlError.value = false
+  try {
+    const r = await fetch(API_BASE + '/' + action, { method: 'POST' })
+    const j = await r.json().catch(() => ({}))
+    if (!r.ok || !j.ok) {
+      controlError.value = true
+      controlMsg.value = j.message || '操作失败 HTTP ' + r.status
+    } else {
+      controlMsg.value = j.message || ('CDC 已' + (action === 'start' ? '启动' : '停止'))
+    }
+    await refresh()
+  } catch (e) {
+    controlError.value = true
+    controlMsg.value = '请求失败: ' + e
+  } finally {
+    busy.value = false
+  }
+}
+
+function startCDC() { return callCDC('start') }
+function confirmStopCDC() {
+  if (!confirm('确认停止 CDC 增量同步？进行中的同步将中断。')) return
+  return callCDC('stop')
+}
+
 async function refresh() {
   try {
     const statusRes = await fetch(API_BASE + '/status').then(r => r.json()).catch(() => null)
-    if (statusRes) status.value = statusRes
+    if (statusRes) {
+      status.value = statusRes
+      control.value = statusRes.control ?? null
+    }
     // Optional module disabled (cdc.enable=false): stop polling, surface notice.
     if (statusRes && statusRes.enabled === false) {
       if (timer) { clearInterval(timer); timer = null }
@@ -288,6 +366,33 @@ code { background: #f0f0f0; padding: 2px 8px; border-radius: 4px; font-size: 13p
 .actions {
   display: flex; align-items: center; gap: 16px; margin-top: 16px;
 }
+
+.control-card {
+  background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 24px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+  display: flex; flex-direction: column; gap: 12px;
+}
+.control-head { display: flex; align-items: center; gap: 12px; }
+.control-badge {
+  font-size: 13px; font-weight: 600; padding: 4px 12px; border-radius: 12px;
+  background: #f0f0f0; color: #666;
+}
+.control-badge.running, .control-badge.adopted { background: #f6ffed; color: #389e0d; }
+.control-badge.starting, .control-badge.stopping { background: #e6f7ff; color: #1890ff; }
+.control-badge.failed { background: #fff1f0; color: #cf1322; }
+.control-restarts { font-size: 12px; color: #faad14; }
+.control-actions { display: flex; gap: 12px; }
+.btn-start, .btn-stop {
+  padding: 8px 20px; border: none; border-radius: 8px; font-size: 14px; cursor: pointer;
+}
+.btn-start { background: #52c41a; color: #fff; }
+.btn-start:hover { opacity: 0.9; }
+.btn-start:disabled { background: #d9d9d9; cursor: not-allowed; }
+.btn-stop { background: #ff4d4f; color: #fff; }
+.btn-stop:hover { opacity: 0.9; }
+.btn-stop:disabled { background: #d9d9d9; cursor: not-allowed; }
+.control-msg { font-size: 13px; color: #52c41a; }
+.control-msg.error { color: #cf1322; }
 
 .disabled-card {
   background: #fff; border: 1px dashed #d9d9d9; border-radius: 12px;
