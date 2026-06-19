@@ -17,7 +17,9 @@ var rootCmd = &cobra.Command{
 It provides:
   - Schema migration (structure, indexes, views)
   - Full data migration (high-performance parallel export/import)
-  - Data validation (row count, sampling, checksum)`,
+  - Data validation (row count, sampling, checksum)
+  - CDC incremental sync (optional module, default OFF — enable via cdc.enable
+    in config, or run 'pg2tidb cdc --enable-cdc')`,
 	SilenceUsage: true,
 }
 

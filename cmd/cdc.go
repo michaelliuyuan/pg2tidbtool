@@ -33,6 +33,23 @@ Prerequisites:
 			return fmt.Errorf("load config: %w", err)
 		}
 
+		// CDC is an OPTIONAL module (cdc.enable defaults to false). Resolve the
+		// effective enable state with priority flag > env > yaml, then gate the
+		// subcommand. An explicit `pg2tidb cdc` invocation is treated as opt-in
+		// intent: we do not hard-refuse, but print a clear enable hint and exit
+		// unless the user opts in via --enable-cdc or PG2TIDB_CDC_FORCE=1.
+		enabled := resolveCDCEnableFromCmd(cfg.CDC.Enable, cmd)
+		forced := os.Getenv("PG2TIDB_CDC_FORCE") == "1"
+		if !enabled && !forced {
+			fmt.Fprintln(os.Stderr, "CDC 模块当前未启用（cdc.enable=false）。")
+			fmt.Fprintln(os.Stderr, "  本次运行: pg2tidb cdc --enable-cdc  （或设环境变量 PG2TIDB_CDC_FORCE=1）")
+			fmt.Fprintln(os.Stderr, "  持久开启: 在 config.yaml 设置 cdc.enable: true")
+			return fmt.Errorf("cdc module disabled (use --enable-cdc, PG2TIDB_CDC_FORCE=1, or set cdc.enable: true)")
+		}
+		if forced && !enabled {
+			fmt.Fprintln(os.Stderr, "note: CDC forced on via PG2TIDB_CDC_FORCE=1 (cdc.enable=false in config).")
+		}
+
 		// Build CDC source config from main config
 		srcCfg := cdc.DefaultSourceConfig()
 		srcCfg.Host = cfg.Source.Host
@@ -41,19 +58,21 @@ Prerequisites:
 		srcCfg.Password = cfg.Source.Password
 		srcCfg.Database = cfg.Source.Database
 		srcCfg.SSLMode = cfg.Source.SSLMode
-		srcCfg.Tables = cfg.Migration.Tables
-		srcCfg.ExcludeTables = cfg.Migration.ExcludeTables
+		srcCfg.Tables = cfg.CDC.Tables
+		srcCfg.ExcludeTables = cfg.CDC.ExcludeTables
 
-		// Override from flags
-		if v, _ := cmd.Flags().GetString("slot"); v != "" {
-			srcCfg.SlotName = v
+		// CDC params default to cfg.CDC.* (see CDCConfig); explicit flags override.
+		srcCfg.SlotName = cfg.CDC.SlotName
+		if cmd.Flags().Changed("slot") {
+			srcCfg.SlotName, _ = cmd.Flags().GetString("slot")
 		}
-		if v, _ := cmd.Flags().GetString("publication"); v != "" {
-			srcCfg.Publication = v
+		srcCfg.Publication = cfg.CDC.Publication
+		if cmd.Flags().Changed("publication") {
+			srcCfg.Publication, _ = cmd.Flags().GetString("publication")
 		}
-		cpFile, _ := cmd.Flags().GetString("checkpoint-file")
-		if cpFile == "" {
-			cpFile = ".cdc_checkpoint.json"
+		cpFile := cfg.CDC.CheckpointFile
+		if cmd.Flags().Changed("checkpoint-file") {
+			cpFile, _ = cmd.Flags().GetString("checkpoint-file")
 		}
 		dataDir, _ := cmd.Flags().GetString("data-dir")
 		if dataDir == "" {
@@ -70,16 +89,25 @@ Prerequisites:
 			fmt.Fprintf(os.Stderr, "cdc status file (web must read this path): %s\n", abs)
 		}
 
-		// Build batch config
+		// Build batch config (defaults from cfg.CDC; explicit flags override)
 		batchCfg := cdc.DefaultBatchConfig()
-		if v, _ := cmd.Flags().GetInt("batch-size"); v > 0 {
-			batchCfg.BatchSize = v
+		batchCfg.BatchSize = cfg.CDC.BatchSize
+		batchCfg.Parallel = cfg.CDC.Parallel
+		batchCfg.ConflictStrategy = cdc.ConflictStrategy(cfg.CDC.ConflictStrategy)
+		if cmd.Flags().Changed("batch-size") {
+			if v, _ := cmd.Flags().GetInt("batch-size"); v > 0 {
+				batchCfg.BatchSize = v
+			}
 		}
-		if v, _ := cmd.Flags().GetInt("parallel"); v > 0 {
-			batchCfg.Parallel = v
+		if cmd.Flags().Changed("parallel") {
+			if v, _ := cmd.Flags().GetInt("parallel"); v > 0 {
+				batchCfg.Parallel = v
+			}
 		}
-		if v, _ := cmd.Flags().GetString("conflict-strategy"); v != "" {
-			batchCfg.ConflictStrategy = cdc.ConflictStrategy(v)
+		if cmd.Flags().Changed("conflict-strategy") {
+			if v, _ := cmd.Flags().GetString("conflict-strategy"); v != "" {
+				batchCfg.ConflictStrategy = cdc.ConflictStrategy(v)
+			}
 		}
 
 		// Build table filter
@@ -119,7 +147,7 @@ Prerequisites:
 			TargetDSN:         targetDSN,
 			CheckpointFile:    cpFile,
 			StatusFile:        statusFile,
-			EnableDDLTracking: true,
+			EnableDDLTracking: cfg.CDC.SyncDDL,
 		}
 
 		runner, err := cdc.NewRunner(runnerCfg)
@@ -164,6 +192,10 @@ Prerequisites:
 
 func init() {
 	rootCmd.AddCommand(cdcCmd)
+
+	// CDC module enable/disable (optional module, default off — see cdc.enable).
+	cdcCmd.Flags().Bool("enable-cdc", false, "enable the CDC module for this run (opt-in when cdc.enable=false)")
+	cdcCmd.Flags().Bool("disable-cdc", false, "disable the CDC module for this run (overrides cdc.enable=true)")
 
 	// CDC-specific flags
 	cdcCmd.Flags().String("slot", "pg2tidb_cdc", "replication slot name")
