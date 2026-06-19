@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"go.uber.org/zap"
 )
 
@@ -26,6 +27,8 @@ type Runner struct {
 	checkpoint  *CheckpointManager
 	filter      *TableFilter
 	ddlTracker  *DDLTracker
+	enableDDL   bool    // cfg.EnableDDLTracking cached (DDL replication, #t59)
+	ddlSrcDB    *sql.DB // source PG conn for ddlTracker (opened in Run, #t59)
 
 	statusFile string    // CDC→Web status JSON path (#t48 B); empty = disabled
 	startTime  time.Time // for uptime in the status report
@@ -83,6 +86,7 @@ func NewRunner(cfg RunnerConfig) (*Runner, error) {
 	r.checkpoint.SetSlotName(cfg.Source.SlotName)
 
 	r.filter = cfg.Filter
+	r.enableDDL = cfg.EnableDDLTracking
 
 	// Source will be created in Run
 	r.source = NewSource(cfg.Source)
@@ -146,6 +150,19 @@ func (r *Runner) Run(ctx context.Context) error {
 		return fmt.Errorf("cdc runner: start source: %w", err)
 	}
 
+	// DDL replication (#t59): if enabled, install the source event trigger and
+	// poll+apply DDL alongside the DML stream. A setup failure degrades to
+	// DML-only; a DDL apply error halts loudly (reported via ddlErrCh).
+	var ddlErrCh chan error
+	if r.enableDDL {
+		if ch, derr := r.setupDDLReplication(ctx, targetDB); derr != nil {
+			r.log.Warn("cdc runner: ddl replication disabled (setup failed), continuing DML-only", zap.Error(derr))
+		} else {
+			ddlErrCh = ch
+			defer r.teardownDDL() // remove event trigger + close source conn on exit
+		}
+	}
+
 	// Start checkpoint ticker
 	cpTicker := time.NewTicker(10 * time.Second)
 	defer cpTicker.Stop()
@@ -204,6 +221,18 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			r.writeStatus() // final status on graceful shutdown
 			return nil
+
+		case ddlErr := <-ddlErrCh:
+			// DDL replication hit a fatal apply error (e.g. a non-idempotent DDL
+			// replay). Halt loudly; checkpoint saved at last-good LSN.
+			r.log.Error("cdc runner: ddl replication halted", zap.Error(ddlErr))
+			r.source.Stop()
+			r.checkpoint.Update(r.source.CurrentLSN())
+			if saveErr := r.checkpoint.Save(); saveErr != nil {
+				r.log.Error("cdc runner: final checkpoint save failed", zap.Error(saveErr))
+			}
+			r.writeStatus()
+			return fmt.Errorf("cdc runner: ddl replication halted: %w", ddlErr)
 
 		case <-cpTicker.C:
 			r.checkpoint.Update(r.source.CurrentLSN())
@@ -276,8 +305,8 @@ func (r *Runner) writeStatus() {
 // Stats returns a summary of the current CDC state.
 func (r *Runner) Stats() map[string]interface{} {
 	stats := map[string]interface{}{
-		"source_events": r.source.EventsReceived(),
-		"source_lsn":    r.source.CurrentLSN().String(),
+		"source_events":  r.source.EventsReceived(),
+		"source_lsn":     r.source.CurrentLSN().String(),
 		"source_running": r.source.IsRunning(),
 		"checkpoint_lsn": r.checkpoint.GetLSN().String(),
 	}
@@ -294,4 +323,91 @@ func (r *Runner) Stats() map[string]interface{} {
 	}
 
 	return stats
+}
+
+// setupDDLReplication opens a source PG connection, installs the DDL event
+// trigger, and starts the DDL poll goroutine. Returns the DDL error channel
+// (receives a fatal DDL apply error that should halt the pipeline). #t59.
+func (r *Runner) setupDDLReplication(ctx context.Context, targetDB *sql.DB) (chan error, error) {
+	sslmode := r.srcCfg.SSLMode
+	if sslmode == "" {
+		sslmode = "disable"
+	}
+	dsn := fmt.Sprintf("postgresql://%s:%s@%s:%d/%s?sslmode=%s",
+		r.srcCfg.User, r.srcCfg.Password, r.srcCfg.Host, r.srcCfg.Port, r.srcCfg.Database, sslmode)
+	srcDB, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open source for ddl tracker: %w", err)
+	}
+	r.ddlSrcDB = srcDB
+	r.ddlTracker = NewDDLTracker(srcDB, r.filter)
+	r.ddlTracker.SetLogger(r.log)
+	if err := r.ddlTracker.SetupEventTrigger(ctx); err != nil {
+		r.ddlSrcDB.Close()
+		r.ddlSrcDB = nil
+		r.ddlTracker = nil
+		return nil, fmt.Errorf("setup ddl event trigger: %w", err)
+	}
+	r.log.Info("cdc runner: ddl replication enabled (event trigger installed)")
+	errCh := make(chan error, 1)
+	go r.runDDLPoller(ctx, targetDB, errCh)
+	return errCh, nil
+}
+
+// teardownDDL removes the event trigger and closes the source PG connection
+// (best-effort, at runner exit). Uses Background() since the run ctx may be
+// canceled by the time we tear down.
+func (r *Runner) teardownDDL() {
+	if r.ddlTracker != nil {
+		if err := r.ddlTracker.TeardownEventTrigger(context.Background()); err != nil {
+			r.log.Warn("cdc runner: ddl teardown", zap.Error(err))
+		}
+	}
+	if r.ddlSrcDB != nil {
+		r.ddlSrcDB.Close()
+	}
+}
+
+// runDDLPoller periodically fetches source DDL captured by the event trigger,
+// transforms it to TiDB DDL, applies it to the target, and checkpoints the
+// last applied ddl_log.id (at-least-once). On a fatal apply error (e.g. a
+// non-idempotent ALTER replayed in a crash window) it reports via errCh and
+// stops, halting the pipeline. #t59 §4.1/§4.2.
+func (r *Runner) runDDLPoller(ctx context.Context, targetDB *sql.DB, errCh chan<- error) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	lastID := r.checkpoint.GetLastDDLID()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		entries, err := r.ddlTracker.FetchNewDDL(ctx, lastID)
+		if err != nil {
+			r.log.Warn("cdc runner: ddl fetch failed", zap.Error(err))
+			continue
+		}
+		for _, e := range entries {
+			ddl := strings.TrimSpace(e.TiDBDDL)
+			// Commented transforms (VIEW/FUNCTION/TRIGGER/incompatible index) are
+			// manual-review placeholders — skip + log, don't apply. #t59 §4.4.
+			if ddl == "" || strings.HasPrefix(ddl, "--") {
+				r.log.Info("cdc runner: ddl skipped (incompatible/commented)",
+					zap.String("type", e.ObjectType), zap.String("ddl", e.DDL))
+				lastID = e.ID
+				r.checkpoint.SetLastDDLID(e.ID)
+				continue
+			}
+			if _, err := targetDB.ExecContext(ctx, ddl); err != nil {
+				r.log.Error("cdc runner: ddl apply failed; halting",
+					zap.Int64("id", e.ID), zap.String("ddl", ddl), zap.Error(err))
+				errCh <- fmt.Errorf("ddl apply (id=%d, %q): %w", e.ID, ddl, err)
+				return
+			}
+			lastID = e.ID
+			r.checkpoint.SetLastDDLID(e.ID)
+			r.log.Info("cdc runner: ddl applied", zap.Int64("id", e.ID), zap.String("ddl", ddl))
+		}
+	}
 }

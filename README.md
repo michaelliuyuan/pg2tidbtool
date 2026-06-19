@@ -319,6 +319,8 @@ CDC（Change Data Capture，PostgreSQL logical replication → TiDB 实时增量
 - `pg2tidb cdc` 打印开启提示并退出（非硬阻断），加 `--enable-cdc` 或 `PG2TIDB_CDC_FORCE=1` 即放行。
 - Web 界面隐藏 CDC 导航入口；`GET /api/v1/features` 返回 `{"cdc":{"enabled":false}}`，`/cdc/status` 返回稳定禁用态。
 
+**DDL 复制（`cdc.sync_ddl`，默认 `true`）**：启用 CDC 后，源端的 `CREATE/ALTER/DROP TABLE`（及 BTREE 索引）会自动复制到 TiDB（PG→TiDB 类型映射 + `IF NOT EXISTS` 幂等 + `ddl_log` id checkpoint 的 at-least-once）。视图/函数/触发器等不兼容 DDL 跳过+告警，不阻断。`sync_ddl: false` 时仅复制 DML（面向已预先全量迁移的 schema）。新表的 DML 若先于其 DDL 到达，applier 会短退避重试等 DDL 落地，超限 halt（不静默丢）。
+
 > ⚠️ **升级提示（行为变更）**：CDC 的同步表清单现从 `cdc.tables` 读取（原从 `migration.tables`）。若你此前依赖 `migration.tables` 过滤 CDC 同步范围，请将其复制到 `cdc.tables`。`cdc.tables` 为空表示同步全部表。
 
 CDC 功能细节（INSERT/UPDATE/DELETE、事务顺序性、checkpoint-on-failure、无 PK 表 halt、Web 只读监控）见 [docs/cdc-web-monitoring-contract.md](docs/cdc-web-monitoring-contract.md)；可选化改造设计见 [docs/cdc-optional-module-design.md](docs/cdc-optional-module-design.md)。

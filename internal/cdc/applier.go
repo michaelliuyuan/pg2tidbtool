@@ -76,14 +76,14 @@ func DefaultBatchConfig() BatchConfig {
 type ApplierStats struct {
 	mu sync.Mutex
 
-	EventsReceived  int64
-	EventsApplied   int64
-	EventsFailed    int64
-	EventsSkipped   int64
-	BatchesFlushed  int64
-	LastLSN         string
-	LastFlushTime   time.Time
-	LastError       string
+	EventsReceived int64
+	EventsApplied  int64
+	EventsFailed   int64
+	EventsSkipped  int64
+	BatchesFlushed int64
+	LastLSN        string
+	LastFlushTime  time.Time
+	LastError      string
 }
 
 // Snapshot returns a copy of the current stats.
@@ -352,31 +352,47 @@ func (a *Applier) applyEvent(ctx context.Context, event *CDCEvent) error {
 	// Apply with conflict strategy override
 	sql = a.applyConflictStrategy(sql, event.Kind)
 
-	// Retry logic
+	// Retry logic. Schema errors (e.g. a new table's DML arrives before its
+	// CREATE DDL is replicated) get a longer retry window so DDL replication can
+	// catch up before halting; other transient errors use the standard retry;
+	// fatal errors abort immediately. #t59 §4.3.
+	const (
+		schemaRetries = 10
+		schemaBackoff = 500 * time.Millisecond
+	)
 	var lastErr error
-	for attempt := 0; attempt <= a.cfg.MaxRetries; attempt++ {
+	for attempt := 0; ; attempt++ {
 		if attempt > 0 {
-			backoff := a.cfg.RetryBackoff * time.Duration(1<<uint(attempt-1))
-			time.Sleep(backoff)
-			a.log.Debug("retrying apply",
-				zap.Int("attempt", attempt),
-				zap.String("sql", sql),
-			)
+			a.log.Debug("retrying apply", zap.Int("attempt", attempt), zap.String("sql", sql))
 		}
-
 		_, err := a.db.ExecContext(ctx, sql)
 		if err == nil {
 			return nil
 		}
-
 		lastErr = err
-		// Don't retry on syntax errors or fatal errors
-		if isFatalError(err) {
-			break
+		switch {
+		case isFatalError(err):
+			// Non-schema fatal (syntax / unknown column / access): don't retry.
+			return fmt.Errorf("apply fatal: %w", err)
+		case isSchemaError(err):
+			// Target table not created yet — wait for DDL replication, then halt
+			// loudly if it never catches up (don't silently drop the DML).
+			if attempt >= schemaRetries {
+				return &StructuralError{Msg: fmt.Sprintf("schema mismatch after %d retries (target table likely not created by DDL yet): %v", schemaRetries, err)}
+			}
+			if err := sleepCtx(ctx, schemaBackoff); err != nil {
+				return err
+			}
+		default:
+			// Transient error: standard bounded retry.
+			if attempt >= a.cfg.MaxRetries {
+				return fmt.Errorf("apply after %d retries: %w", a.cfg.MaxRetries, lastErr)
+			}
+			if err := sleepCtx(ctx, a.cfg.RetryBackoff*time.Duration(1<<uint(attempt))); err != nil {
+				return err
+			}
 		}
 	}
-
-	return fmt.Errorf("apply after %d retries: %w", a.cfg.MaxRetries, lastErr)
 }
 
 // applyConflictStrategy adjusts SQL based on the configured conflict strategy.
@@ -469,10 +485,7 @@ func isFatalError(err error) bool {
 	fatalPatterns := []string{
 		"syntax error",
 		"unknown column",
-		"table doesn't exist",
-		"no such table",
 		"access denied",
-		"Error 1146", // Table doesn't exist
 		"Error 1054", // Unknown column
 		"Error 1064", // Syntax error
 	}
@@ -482,4 +495,31 @@ func isFatalError(err error) bool {
 		}
 	}
 	return false
+}
+
+// isSchemaError reports a target-schema mismatch (e.g. a new table's DML
+// arrived before its CREATE DDL was replicated). These are retried longer to
+// let DDL replication catch up, then halt. #t59 §4.3. (Previously these were in
+// fatalPatterns — i.e. not retried — which silently diverged on missing tables.)
+func isSchemaError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, p := range []string{"table doesn't exist", "no such table", "Error 1146"} {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// sleepCtx sleeps for d but returns early (with ctx.Err()) on context cancel.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

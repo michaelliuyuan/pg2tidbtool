@@ -24,6 +24,7 @@ type DDLTracker struct {
 
 // DDLEntry records a captured DDL statement.
 type DDLEntry struct {
+	ID         int64  `json:"id"` // pg2tidb_ddl_log.id (DDL checkpoint cursor, #t59)
 	LSN        string `json:"lsn"`
 	Schema     string `json:"schema"`
 	ObjectName string `json:"object_name"`
@@ -149,6 +150,7 @@ func (t *DDLTracker) FetchNewDDL(ctx context.Context, sinceID int64) ([]DDLEntry
 			&e.ObjectType, &e.DDL); err != nil {
 			return nil, fmt.Errorf("scan ddl entry: %w", err)
 		}
+		e.ID = id
 		e.LSN = fmt.Sprintf("ddl_%d", id)
 
 		// Transform DDL for TiDB

@@ -68,7 +68,7 @@ func TestIsFatalError(t *testing.T) {
 		fatal  bool
 	}{
 		{"Error 1064: You have an error in your SQL syntax", true},
-		{"Error 1146: Table 'test.users' doesn't exist", true},
+		{"Error 1146: Table 'test.users' doesn't exist", false}, // schema error now (#t59): retried then halted via StructuralError, not fatal-no-retry
 		{"Error 1054: Unknown column 'foo' in 'field list'", true},
 		{"syntax error near 'SELECT'", true},
 		{"access denied for user 'root'", true},
@@ -83,6 +83,28 @@ func TestIsFatalError(t *testing.T) {
 		got := isFatalError(err)
 		if got != tt.fatal {
 			t.Errorf("isFatalError(%q) = %v, want %v", tt.errMsg, got, tt.fatal)
+		}
+	}
+}
+
+// TestIsSchemaError covers the #t59 schema-mismatch path: a new table's DML may
+// arrive before its CREATE DDL — such errors are retried longer, then halt.
+func TestIsSchemaError(t *testing.T) {
+	tests := []struct {
+		errMsg string
+		want   bool
+	}{
+		{"Error 1146: Table 'test.users' doesn't exist", true},
+		{"table doesn't exist: foo", true},
+		{"no such table: bar", true},
+		{"Error 1064: syntax error", false}, // fatal, not schema
+		{"connection refused", false},
+		{"deadlock", false},
+	}
+	for _, tt := range tests {
+		err := &testError{msg: tt.errMsg}
+		if got := isSchemaError(err); got != tt.want {
+			t.Errorf("isSchemaError(%q) = %v, want %v", tt.errMsg, got, tt.want)
 		}
 	}
 }

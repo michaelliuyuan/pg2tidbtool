@@ -57,7 +57,7 @@ cdc:
   batch_size: 1000              # max events per apply batch
   parallel: 1                   # 1=serial (correctness-first); >1 routes per-table, no cross-table FK/txn guarantee (#t48 Bug#8)
   conflict_strategy: "replace"  # replace / insert_ignore / upsert / skip
-  sync_ddl: true                # DDL tracking (schema-change propagation)
+  sync_ddl: true                # replicate source DDL to TiDB (CREATE/ALTER/DROP TABLE + INDEX BTREE; VIEW/FN/TRIGGER skipped); false = DML only (pre-migrated schema)
   tables: []                    # include list (schema.table, supports *)
   exclude_tables: []            # exclude list (schema.table, supports *)
   checkpoint_file: ".cdc_checkpoint.json"  # LSN checkpoint file
