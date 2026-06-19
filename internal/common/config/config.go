@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"time"
 
 	"go.uber.org/zap"
@@ -17,6 +18,7 @@ type Config struct {
 	Compare   CompareConfig   `yaml:"compare" json:"compare"`
 	Logging   LoggingConfig   `yaml:"logging" json:"logging"`
 	Web       WebConfig       `yaml:"web" json:"web"`
+	CDC       CDCConfig       `yaml:"cdc" json:"cdc"`
 }
 
 // CompareConfig controls data comparison/validation behavior, especially for
@@ -72,11 +74,11 @@ func (s SourceConfig) DSN() string {
 }
 
 type TargetConfig struct {
-	Host     string `yaml:"host" json:"host"`
-	Port     int    `yaml:"port" json:"port"`
-	User     string `yaml:"user" json:"user"`
-	Password string `yaml:"password" json:"password"`
-	Database string `yaml:"database" json:"database"`
+	Host       string `yaml:"host" json:"host"`
+	Port       int    `yaml:"port" json:"port"`
+	User       string `yaml:"user" json:"user"`
+	Password   string `yaml:"password" json:"password"`
+	Database   string `yaml:"database" json:"database"`
 	PDAddr     string `yaml:"pd_addr" json:"pd_addr"`
 	StatusPort int    `yaml:"status_port" json:"status_port"`
 }
@@ -135,6 +137,72 @@ type WebConfig struct {
 	Host   string `yaml:"host" json:"host"`
 }
 
+// CDCConfig controls the OPTIONAL CDC (Change Data Capture) incremental sync
+// module: PostgreSQL logical replication → TiDB. It is an optional module and
+// is DISABLED by default (Enable=false) — pg2tidb ships as a pure full-migration
+// tool; opt in explicitly when you need zero-downtime incremental sync. This
+// mirrors the existing WebConfig.Enable pattern. The parameters were previously
+// scattered as flags in cmd/cdc.go; collecting them here lets the whole module
+// be configured declaratively and toggled with a single switch.
+type CDCConfig struct {
+	// Enable turns the CDC module on. Default false. When false, the CDC command
+	// and dashboard surface a disabled state and Validate() skips all CDC checks.
+	Enable bool `yaml:"enable" json:"enable"`
+
+	// Mode selects the sync shape:
+	//   "full_incr" — full migration followed by incremental sync (zero-downtime, default)
+	//   "incr_only" — incremental sync only; requires a pre-migrated base schema
+	Mode string `yaml:"mode" json:"mode"`
+
+	// SlotName is the PostgreSQL logical replication slot name.
+	SlotName string `yaml:"slot_name" json:"slotName"`
+
+	// Publication is the PostgreSQL publication name. Yaml key publication_name
+	// mirrors the slot_name pattern (descriptive key even though the flag is bare).
+	Publication string `yaml:"publication_name" json:"publicationName"`
+
+	// BatchSize is the maximum number of events to accumulate before flushing.
+	BatchSize int `yaml:"batch_size" json:"batchSize"`
+
+	// Parallel is the number of concurrent applier workers. Default 1 = serial
+	// (correctness-first); >1 routes events per-table but does NOT guarantee
+	// cross-table FK ordering or multi-table txn atomicity (see #t48 Bug#8).
+	Parallel int `yaml:"parallel" json:"parallel"`
+
+	// ConflictStrategy is the target-side conflict resolution strategy.
+	// One of: replace / insert_ignore / upsert / skip.
+	ConflictStrategy string `yaml:"conflict_strategy" json:"conflictStrategy"`
+
+	// SyncDDL enables DDL tracking (schema-change propagation). Default true
+	// preserves the previous hardcoded EnableDDLTracking behavior.
+	SyncDDL bool `yaml:"sync_ddl" json:"syncDdl"`
+
+	// Tables is an explicit include list (schema.table, supports * wildcards).
+	Tables []string `yaml:"tables" json:"tables"`
+
+	// ExcludeTables is an explicit exclude list (schema.table, supports * wildcards).
+	ExcludeTables []string `yaml:"exclude_tables" json:"excludeTables"`
+
+	// CheckpointFile is the LSN checkpoint file path.
+	CheckpointFile string `yaml:"checkpoint_file" json:"checkpointFile"`
+}
+
+// ValidCDCModes are the accepted values for CDCConfig.Mode.
+var ValidCDCModes = map[string]bool{
+	"full_incr": true,
+	"incr_only": true,
+}
+
+// ValidCDCConflictStrategies are the accepted values for CDCConfig.ConflictStrategy.
+// Kept as a plain string whitelist (not the cdc package's ConflictStrategy type) so
+// the config package stays decoupled from internal/cdc.
+var ValidCDCConflictStrategies = map[string]bool{
+	"replace":       true,
+	"insert_ignore": true,
+	"upsert":        true,
+	"skip":          true,
+}
+
 func DefaultConfig() *Config {
 	return &Config{
 		Source: SourceConfig{
@@ -161,7 +229,7 @@ func DefaultConfig() *Config {
 			LargeTableThreshold: 1000000,
 			ChunkSize:           500000,
 			ChunkParallel:       4,
-			},
+		},
 		Compare: CompareConfig{
 			CompareMode:        "sample",
 			SampleRatio:        0.01,
@@ -179,6 +247,17 @@ func DefaultConfig() *Config {
 			Enable: false,
 			Port:   8080,
 			Host:   "0.0.0.0",
+		},
+		CDC: CDCConfig{
+			Enable:           false, // optional module: OFF by default
+			Mode:             "full_incr",
+			SlotName:         "pg2tidb_cdc",
+			Publication:      "pg2tidb_pub",
+			BatchSize:        1000,
+			Parallel:         1, // serial by default — correctness-first (see #t48 Bug#8)
+			ConflictStrategy: "replace",
+			SyncDDL:          true,
+			CheckpointFile:   ".cdc_checkpoint.json",
 		},
 	}
 }
@@ -251,6 +330,33 @@ func LoadWithOverrides(path string, overrides map[string]string) (*Config, error
 		cfg.Logging.Format = v
 	}
 
+	// CDC module overrides. cdc.enable is the primary switch (used by the CLI
+	// --enable-cdc / PG2TIDB_CDC_FORCE override in D2); the remaining keys allow
+	// declarative config to be flipped without editing the YAML file.
+	if v, ok := overrides["cdc.enable"]; ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.CDC.Enable = b
+		}
+	}
+	if v, ok := overrides["cdc.mode"]; ok {
+		cfg.CDC.Mode = v
+	}
+	if v, ok := overrides["cdc.slot_name"]; ok {
+		cfg.CDC.SlotName = v
+	}
+	if v, ok := overrides["cdc.publication_name"]; ok {
+		cfg.CDC.Publication = v
+	}
+	if v, ok := overrides["cdc.batch_size"]; ok {
+		fmt.Sscanf(v, "%d", &cfg.CDC.BatchSize)
+	}
+	if v, ok := overrides["cdc.parallel"]; ok {
+		fmt.Sscanf(v, "%d", &cfg.CDC.Parallel)
+	}
+	if v, ok := overrides["cdc.conflict_strategy"]; ok {
+		cfg.CDC.ConflictStrategy = v
+	}
+
 	return cfg, nil
 }
 
@@ -285,6 +391,21 @@ func (c *Config) Validate() error {
 	if c.Web.Enable {
 		if c.Web.Port <= 0 || c.Web.Port > 65535 {
 			return fmt.Errorf("web.port must be between 1 and 65535")
+		}
+	}
+	// CDC is an optional module: only validate its parameters when enabled.
+	if c.CDC.Enable {
+		if !ValidCDCModes[c.CDC.Mode] {
+			return fmt.Errorf("cdc.mode must be 'full_incr' or 'incr_only'")
+		}
+		if c.CDC.BatchSize <= 0 {
+			return fmt.Errorf("cdc.batch_size must be positive")
+		}
+		if c.CDC.Parallel <= 0 {
+			return fmt.Errorf("cdc.parallel must be positive")
+		}
+		if !ValidCDCConflictStrategies[c.CDC.ConflictStrategy] {
+			return fmt.Errorf("cdc.conflict_strategy must be one of replace, insert_ignore, upsert, skip")
 		}
 	}
 	return nil

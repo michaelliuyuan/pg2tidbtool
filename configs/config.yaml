@@ -44,3 +44,20 @@ web:
   enable: false
   port: 8080
   host: "0.0.0.0"
+
+# CDC incremental sync (PostgreSQL logical replication → TiDB).
+# OPTIONAL module — disabled by default. pg2tidb ships as a pure full-migration
+# tool; set enable: true only when you need zero-downtime incremental sync.
+# When disabled, `pg2tidb cdc` prints an enable hint instead of running (see D2).
+cdc:
+  enable: false                 # master switch — off by default
+  mode: "full_incr"             # full_incr (full + incremental, default) / incr_only (needs pre-migrated schema)
+  slot_name: "pg2tidb_cdc"      # PostgreSQL logical replication slot
+  publication_name: "pg2tidb_pub"  # PostgreSQL publication
+  batch_size: 1000              # max events per apply batch
+  parallel: 1                   # 1=serial (correctness-first); >1 routes per-table, no cross-table FK/txn guarantee (#t48 Bug#8)
+  conflict_strategy: "replace"  # replace / insert_ignore / upsert / skip
+  sync_ddl: true                # DDL tracking (schema-change propagation)
+  tables: []                    # include list (schema.table, supports *)
+  exclude_tables: []            # exclude list (schema.table, supports *)
+  checkpoint_file: ".cdc_checkpoint.json"  # LSN checkpoint file
