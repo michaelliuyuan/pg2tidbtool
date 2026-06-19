@@ -10,6 +10,7 @@ import (
 // CDCStatusResponse is returned by GET /api/v1/cdc/status.
 type CDCStatusResponse struct {
 	Available     bool    `json:"available"`
+	Enabled       bool    `json:"enabled"` // false when the CDC module is off (cdc.enable=false)
 	Running       bool    `json:"running"`
 	State         string  `json:"state"` // not_running | running | stale | halted
 	Message       string  `json:"message,omitempty"`
@@ -33,7 +34,7 @@ type cdcStatusView struct {
 	PID           int
 	UptimeSeconds float64
 	FatalError    string
-	Stats         *cdc.CDCStatusStats   // nil when there is no status file
+	Stats         *cdc.CDCStatusStats // nil when there is no status file
 	Checkpoint    *cdc.CDCStatusCheckpoint
 }
 
@@ -110,9 +111,21 @@ func cdcMessage(v cdcStatusView) string {
 
 // handleCDCStatus handles GET /api/v1/cdc/status.
 func (s *Server) handleCDCStatus(w http.ResponseWriter, r *http.Request) {
+	// Optional module disabled (cdc.enable=false): return a stable disabled
+	// state instead of probing the CDC process (D3 #t53).
+	if !s.cdcEnabled {
+		s.writeJSON(w, http.StatusOK, CDCStatusResponse{
+			Available: false,
+			Enabled:   false,
+			State:     "disabled",
+			Message:   "CDC module disabled. Set cdc.enable: true in config to enable.",
+		})
+		return
+	}
 	v := s.cdcStatus()
 	resp := CDCStatusResponse{
 		Available:     true,
+		Enabled:       true,
 		Running:       v.Running,
 		State:         v.State,
 		Message:       cdcMessage(v),

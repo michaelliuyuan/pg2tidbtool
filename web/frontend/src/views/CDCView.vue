@@ -3,6 +3,14 @@
     <h1>CDC 增量同步</h1>
     <p class="subtitle">PostgreSQL → TiDB 实时增量同步监控</p>
 
+    <!-- Module disabled (cdc.enable=false) -->
+    <div class="disabled-card" v-if="disabled">
+      <h3>🚫 CDC 模块未启用</h3>
+      <p>当前部署未开启 CDC 增量同步（<code>cdc.enable: false</code>）。</p>
+      <p class="hint">如需使用：在 config.yaml 设置 <code>cdc.enable: true</code>，或用 <code>pg2tidb cdc --enable-cdc</code> 启动。</p>
+    </div>
+
+    <template v-else>
     <!-- Status Card -->
     <div class="status-card" :class="statusState">
       <div class="status-indicator">
@@ -103,6 +111,7 @@
       <button @click="refresh" class="btn-refresh">🔄 刷新</button>
       <span class="auto-refresh">自动刷新: {{ refreshInterval }}s</span>
     </div>
+    </template>
   </div>
 </template>
 
@@ -114,6 +123,7 @@ const API_BASE = '/api/v1/cdc'
 // Mirrors the web API contract (docs/cdc-web-monitoring-contract.md, #t48 B).
 interface CDCStatus {
   available?: boolean
+  enabled?: boolean // false when the CDC module is off (cdc.enable=false)
   running: boolean
   state?: string // not_running | running | stale | halted
   message?: string
@@ -166,16 +176,24 @@ const statusLabel = computed(() => {
   }
 })
 
+// CDC is an optional module: when disabled (cdc.enable=false) the dashboard is
+// replaced by a notice and polling stops (D3 #t53).
+const disabled = computed(() => status.value.enabled === false)
+
 async function refresh() {
   try {
-    const [statusRes, statsRes, cpRes] = await Promise.all([
-      fetch(API_BASE + '/status').then(r => r.json()).catch(() => null),
+    const statusRes = await fetch(API_BASE + '/status').then(r => r.json()).catch(() => null)
+    if (statusRes) status.value = statusRes
+    // Optional module disabled (cdc.enable=false): stop polling, surface notice.
+    if (statusRes && statusRes.enabled === false) {
+      if (timer) { clearInterval(timer); timer = null }
+      return
+    }
+    // /stats and /checkpoint return {} (empty object) when not_running — treat as no data.
+    const [statsRes, cpRes] = await Promise.all([
       fetch(API_BASE + '/stats').then(r => r.json()).catch(() => null),
       fetch(API_BASE + '/checkpoint').then(r => r.json()).catch(() => null),
     ])
-
-    if (statusRes) status.value = statusRes
-    // /stats and /checkpoint return {} (empty object) when not_running — treat as no data.
     if (statsRes && statsRes.source_events !== undefined) stats.value = statsRes
     if (cpRes && cpRes.lsn) checkpoint.value = cpRes
   } catch {
@@ -270,6 +288,15 @@ code { background: #f0f0f0; padding: 2px 8px; border-radius: 4px; font-size: 13p
 .actions {
   display: flex; align-items: center; gap: 16px; margin-top: 16px;
 }
+
+.disabled-card {
+  background: #fff; border: 1px dashed #d9d9d9; border-radius: 12px;
+  padding: 32px 24px; text-align: center; color: #666;
+}
+.disabled-card h3 { font-size: 18px; color: #1a1a2e; margin-bottom: 12px; }
+.disabled-card p { font-size: 14px; margin: 6px 0; }
+.disabled-card .hint { color: #999; font-size: 13px; }
+.disabled-card code { background: #f0f0f0; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
 .btn-refresh {
   padding: 8px 20px; border: none; border-radius: 8px;
   background: #1a1a2e; color: #fff; font-size: 14px; cursor: pointer;

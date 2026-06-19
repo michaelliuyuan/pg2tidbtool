@@ -1,6 +1,9 @@
 package webapi
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -75,5 +78,73 @@ func TestFileCDCStatusProvider(t *testing.T) {
 	})
 	if v := prov.StatusView(); v.State != string(cdc.LivenessStale) {
 		t.Errorf("pid-dead: state=%s, want stale", v.State)
+	}
+}
+
+// TestCDCStatusDisabledState: cdc.enable=false → /cdc/status returns a stable
+// disabled state without probing the CDC process (D3 #t53).
+func TestCDCStatusDisabledState(t *testing.T) {
+	s := &Server{cdcEnabled: false}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cdc/status", nil)
+	rr := httptest.NewRecorder()
+	s.handleCDCStatus(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("disabled: status=%d, want 200", rr.Code)
+	}
+	var resp CDCStatusResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Enabled || resp.Available {
+		t.Errorf("disabled: enabled=%v available=%v, want false/false", resp.Enabled, resp.Available)
+	}
+	if resp.State != "disabled" {
+		t.Errorf("disabled: state=%q, want disabled", resp.State)
+	}
+}
+
+// TestCDCStatusEnabledState: cdc.enable=true → enabled/available true; without a
+// status provider it reports not_running (no provider wired).
+func TestCDCStatusEnabledState(t *testing.T) {
+	s := &Server{cdcEnabled: true}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/cdc/status", nil)
+	rr := httptest.NewRecorder()
+	s.handleCDCStatus(rr, req)
+
+	var resp CDCStatusResponse
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if !resp.Enabled || !resp.Available {
+		t.Errorf("enabled: enabled=%v available=%v, want true/true", resp.Enabled, resp.Available)
+	}
+	if resp.State != string(cdc.LivenessNotRunning) {
+		t.Errorf("enabled (no provider): state=%q, want not_running", resp.State)
+	}
+}
+
+// TestFeaturesEndpoint: /features exposes cdc.enabled and is never cached.
+func TestFeaturesEndpoint(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		s := &Server{cdcEnabled: enabled}
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/features", nil)
+		rr := httptest.NewRecorder()
+		s.handleFeatures(rr, req)
+
+		if cc := rr.Header().Get("Cache-Control"); cc != "no-store" {
+			t.Errorf("features(enabled=%v): cache-control=%q, want no-store", enabled, cc)
+		}
+		var resp struct {
+			CDC struct {
+				Enabled bool `json:"enabled"`
+			} `json:"cdc"`
+		}
+		if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+			t.Fatalf("features(enabled=%v): decode: %v", enabled, err)
+		}
+		if resp.CDC.Enabled != enabled {
+			t.Errorf("features(enabled=%v): cdc.enabled=%v, want %v", enabled, resp.CDC.Enabled, enabled)
+		}
 	}
 }

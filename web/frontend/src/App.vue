@@ -1,7 +1,19 @@
 <script setup lang="ts">
+import { ref, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 const router = useRouter()
 const route = useRoute()
+
+// Optional modules: CDC is hidden unless /features reports it enabled (D3 #t53).
+const cdcEnabled = ref(false)
+onMounted(async () => {
+  try {
+    const r = await fetch('/api/v1/features')
+    if (r.ok) cdcEnabled.value = !!(await r.json())?.cdc?.enabled
+  } catch {
+    // default: CDC hidden
+  }
+})
 </script>
 
 <template>
@@ -35,7 +47,7 @@ const route = useRoute()
           <el-icon><DataAnalysis /></el-icon>
           <span>兼容性评估</span>
         </el-menu-item>
-        <el-menu-item index="/cdc">
+        <el-menu-item index="/cdc" v-if="cdcEnabled">
           <el-icon><DataLine /></el-icon>
           <span>CDC 增量同步</span>
         </el-menu-item>

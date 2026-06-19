@@ -17,12 +17,12 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/pg2tidb/pg2tidb-migrator/internal/assess"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/checkpoint"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/config"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/logger"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/common/reporter"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/orchestrator"
-	"github.com/pg2tidb/pg2tidb-migrator/internal/assess"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/store"
 	"go.uber.org/zap"
 )
@@ -32,14 +32,18 @@ var upgrader = websocket.Upgrader{
 }
 
 type Server struct {
-	router       chi.Router
-	store        *store.Store
-	addr         string
-	hub          *Hub
-	dataDir      string
+	router  chi.Router
+	store   *store.Store
+	addr    string
+	hub     *Hub
+	dataDir string
 
 	// CDC status provider (#t48 B): reads the CDC process's status file.
 	cdcProvider cdcStatusProvider
+
+	// cdcEnabled reflects cdc.enable (D3 #t53): when false the CDC dashboard is
+	// hidden by the frontend and /cdc/status reports a stable disabled state.
+	cdcEnabled bool
 
 	// running tasks
 	runningTasks map[string]context.CancelFunc
@@ -84,7 +88,7 @@ func (h *Hub) Run() {
 	}
 }
 
-func NewServer(store *store.Store, host string, port int, dataDir string, staticFS embed.FS) *Server {
+func NewServer(store *store.Store, host string, port int, dataDir string, staticFS embed.FS, cdcEnabled bool) *Server {
 	s := &Server{
 		store:        store,
 		addr:         fmt.Sprintf("%s:%d", host, port),
@@ -93,6 +97,7 @@ func NewServer(store *store.Store, host string, port int, dataDir string, static
 		dataDir:      dataDir,
 		logCollector: NewLogCollector(),
 		logCores:     make(map[string]*TaskLogCore),
+		cdcEnabled:   cdcEnabled,
 	}
 
 	r := chi.NewRouter()
@@ -109,6 +114,7 @@ func NewServer(store *store.Store, host string, port int, dataDir string, static
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/health", s.handleHealth)
+		r.Get("/features", s.handleFeatures)
 		r.Post("/config/test-connection", s.handleTestConnection)
 		r.Post("/config/list-tables", s.handleListTables)
 		r.Post("/tasks", s.handleCreateTask)
@@ -126,11 +132,11 @@ func NewServer(store *store.Store, host string, port int, dataDir string, static
 			r.Get("/phases", s.handleTaskPhases)
 		})
 		r.Get("/ws", s.handleWebSocket)
-			r.Post("/assess", s.handleAssess)
-			// CDC endpoints (#t48 B: read CDC process status file)
-			r.Get("/cdc/status", s.handleCDCStatus)
-			r.Get("/cdc/stats", s.handleCDCStats)
-			r.Get("/cdc/checkpoint", s.handleCDCCheckpoint)
+		r.Post("/assess", s.handleAssess)
+		// CDC endpoints (#t48 B: read CDC process status file)
+		r.Get("/cdc/status", s.handleCDCStatus)
+		r.Get("/cdc/stats", s.handleCDCStats)
+		r.Get("/cdc/checkpoint", s.handleCDCCheckpoint)
 	})
 
 	if staticFS != (embed.FS{}) {
@@ -207,6 +213,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":    "ok",
 		"timestamp": time.Now().Format(time.RFC3339),
+	})
+}
+
+// handleFeatures exposes optional-module switches so the frontend can
+// conditionally render modules (e.g. the CDC dashboard). It is never cached —
+// the frontend must see the current toggle on every load (D3 #t53).
+func (s *Server) handleFeatures(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+		"cdc": map[string]bool{"enabled": s.cdcEnabled},
 	})
 }
 
@@ -367,7 +383,7 @@ func (s *Server) handleListTables(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type TableInfo struct {
-		Name       string `json:"name"`
+		Name        string `json:"name"`
 		RowEstimate int64  `json:"row_estimate"`
 	}
 	var tables []TableInfo
@@ -388,27 +404,27 @@ func (s *Server) handleListTables(w http.ResponseWriter, r *http.Request) {
 }
 
 type CreateTaskRequest struct {
-	Name   string         `json:"name"`
-	Source config.SourceConfig   `json:"source"`
-	Target config.TargetConfig   `json:"target"`
-	Opts   MigrationOptsBody `json:"opts"`
+	Name   string              `json:"name"`
+	Source config.SourceConfig `json:"source"`
+	Target config.TargetConfig `json:"target"`
+	Opts   MigrationOptsBody   `json:"opts"`
 }
 
 type MigrationOptsBody struct {
-	Parallel      int      `json:"parallel"`
-	BatchSize     int      `json:"batch_size"`
-	Tables        []string `json:"tables"`
-	ExcludeTables []string `json:"exclude_tables"`
-	UseLightning  bool     `json:"use_lightning"`
-	SkipPrecheck  bool     `json:"skip_precheck"`
-	SkipSchema    bool     `json:"skip_schema"`
-	SkipData      bool     `json:"skip_data"`
-	SkipValidate        bool    `json:"skip_validate"`
-	TargetPolicy        string  `json:"target_policy"`
-	CompareMode         string  `json:"compare_mode"`
-	SampleRatio         float64 `json:"sample_ratio"`
-	ChecksumChunkSize   int64   `json:"checksum_chunk_size"`
-	ChecksumParallel    int     `json:"checksum_parallel"`
+	Parallel          int      `json:"parallel"`
+	BatchSize         int      `json:"batch_size"`
+	Tables            []string `json:"tables"`
+	ExcludeTables     []string `json:"exclude_tables"`
+	UseLightning      bool     `json:"use_lightning"`
+	SkipPrecheck      bool     `json:"skip_precheck"`
+	SkipSchema        bool     `json:"skip_schema"`
+	SkipData          bool     `json:"skip_data"`
+	SkipValidate      bool     `json:"skip_validate"`
+	TargetPolicy      string   `json:"target_policy"`
+	CompareMode       string   `json:"compare_mode"`
+	SampleRatio       float64  `json:"sample_ratio"`
+	ChecksumChunkSize int64    `json:"checksum_chunk_size"`
+	ChecksumParallel  int      `json:"checksum_parallel"`
 }
 
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
@@ -435,19 +451,19 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		Source: req.Source,
 		Target: req.Target,
 		Migration: config.MigrationConfig{
-			Parallel:            req.Opts.Parallel,
-			BatchSize:           req.Opts.BatchSize,
-			Tables:              req.Opts.Tables,
-			ExcludeTables:       req.Opts.ExcludeTables,
-			UseLightning:        req.Opts.UseLightning,
-			TempDir:             "/tmp/pg2tidb",
-			CheckpointDir:       fmt.Sprintf(".checkpoint/%s", task.ID),
-			OnError:             "abort",
-			TargetPolicy:        req.Opts.TargetPolicy,
-			SkipPrecheck:        req.Opts.SkipPrecheck,
-			SkipSchema:          req.Opts.SkipSchema,
-			SkipData:            req.Opts.SkipData,
-			SkipValidate:        req.Opts.SkipValidate,
+			Parallel:      req.Opts.Parallel,
+			BatchSize:     req.Opts.BatchSize,
+			Tables:        req.Opts.Tables,
+			ExcludeTables: req.Opts.ExcludeTables,
+			UseLightning:  req.Opts.UseLightning,
+			TempDir:       "/tmp/pg2tidb",
+			CheckpointDir: fmt.Sprintf(".checkpoint/%s", task.ID),
+			OnError:       "abort",
+			TargetPolicy:  req.Opts.TargetPolicy,
+			SkipPrecheck:  req.Opts.SkipPrecheck,
+			SkipSchema:    req.Opts.SkipSchema,
+			SkipData:      req.Opts.SkipData,
+			SkipValidate:  req.Opts.SkipValidate,
 		},
 		Logging: config.LoggingConfig{Level: "info", Format: "console"},
 		Compare: config.CompareConfig{
@@ -998,16 +1014,16 @@ func (s *Server) handleTaskPhases(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type PhaseInfo struct {
-		Name        string                   `json:"name"`
-		Label       string                   `json:"label"`
-		Status      string                   `json:"status"`
-		SubLabel    string                   `json:"sub_label,omitempty"`
-		Tables      []map[string]interface{} `json:"tables,omitempty"`
-		TableCount  int                      `json:"table_count"`
-		TablesDone  int                      `json:"tables_done"`
-		RowsTotal   int64                    `json:"rows_total"`
-		RowsDone    int64                    `json:"rows_done"`
-		Logs        []map[string]interface{} `json:"logs,omitempty"`
+		Name       string                   `json:"name"`
+		Label      string                   `json:"label"`
+		Status     string                   `json:"status"`
+		SubLabel   string                   `json:"sub_label,omitempty"`
+		Tables     []map[string]interface{} `json:"tables,omitempty"`
+		TableCount int                      `json:"table_count"`
+		TablesDone int                      `json:"tables_done"`
+		RowsTotal  int64                    `json:"rows_total"`
+		RowsDone   int64                    `json:"rows_done"`
+		Logs       []map[string]interface{} `json:"logs,omitempty"`
 	}
 
 	phaseNames := []struct{ name, label string }{

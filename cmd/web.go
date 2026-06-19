@@ -7,17 +7,18 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/pg2tidb/pg2tidb-migrator/internal/common/config"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/store"
 	"github.com/pg2tidb/pg2tidb-migrator/internal/webapi"
 	"github.com/spf13/cobra"
 )
 
 var (
-	webPort          int
-	webHost          string
-	webData          string
-	cdcStatusFile    string
-	cdcStaleSec      int
+	webPort       int
+	webHost       string
+	webData       string
+	cdcStatusFile string
+	cdcStaleSec   int
 )
 
 var webCmd = &cobra.Command{
@@ -40,7 +41,14 @@ Default URL: http://localhost:8080`,
 		}
 		defer s.Close()
 
-		srv := webapi.NewServer(s, webHost, webPort, dataDir, StaticFS)
+		// Load config to read the CDC module switch (cdc.enable) and inject it
+		// into the web server (D3 #t53).
+		cfg, err := config.Load(cfgFile)
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+
+		srv := webapi.NewServer(s, webHost, webPort, dataDir, StaticFS, cfg.CDC.Enable)
 		// CDC dashboard (#t48 B): read the CDC process's status file. Default is
 		// <data-dir>/cdc/status.json (shared with CDC's --data-dir). Log the
 		// resolved absolute path so a CDC/web cwd mismatch is VISIBLE, not a
