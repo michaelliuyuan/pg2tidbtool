@@ -1,6 +1,6 @@
 # pg2tidb
 
-一键式 PostgreSQL → TiDB 全量数据迁移工具，覆盖兼容性评估、Schema 迁移、全量数据迁移、数据校验四大能力。支持 CLI 和 Web 管理界面两种使用方式。
+一键式 PostgreSQL → TiDB 全量数据迁移工具，覆盖兼容性评估、Schema 迁移、全量数据迁移、数据校验四大能力，并含**可选的 CDC 增量同步**（PostgreSQL → TiDB 实时增量 + DDL 复制，默认关闭）。支持 CLI 和 Web 管理界面两种使用方式。
 
 ## 特性
 
@@ -271,7 +271,7 @@ cdc:
   batch_size: 1000             # 每批最大事件数
   parallel: 1                  # 1=串行(正确性优先)；>1 按表并行(不保证跨表 FK/多表事务序)
   conflict_strategy: "replace" # replace | insert_ignore | upsert | skip
-  sync_ddl: true               # DDL 跟踪
+  sync_ddl: true               # 复制源端 DDL 到 TiDB（CREATE/ALTER/DROP TABLE + BTREE 索引；VIEW/FN/TRIGGER 跳过）；false=仅 DML
   tables: []                   # CDC 同步表清单（空=全部，独立于 migration.tables）
   exclude_tables: []
   checkpoint_file: ".cdc_checkpoint.json"
@@ -319,11 +319,13 @@ CDC（Change Data Capture，PostgreSQL logical replication → TiDB 实时增量
 - `pg2tidb cdc` 打印开启提示并退出（非硬阻断），加 `--enable-cdc` 或 `PG2TIDB_CDC_FORCE=1` 即放行。
 - Web 界面隐藏 CDC 导航入口；`GET /api/v1/features` 返回 `{"cdc":{"enabled":false}}`，`/cdc/status` 返回稳定禁用态。
 
-**DDL 复制（`cdc.sync_ddl`，默认 `true`）**：启用 CDC 后，源端的 `CREATE/ALTER/DROP TABLE`（及 BTREE 索引）会自动复制到 TiDB（PG→TiDB 类型映射 + `IF NOT EXISTS` 幂等 + `ddl_log` id checkpoint 的 at-least-once）。视图/函数/触发器等不兼容 DDL 跳过+告警，不阻断。`sync_ddl: false` 时仅复制 DML（面向已预先全量迁移的 schema）。新表的 DML 若先于其 DDL 到达，applier 会短退避重试等 DDL 落地，超限 halt（不静默丢）。
+**Web 一键启停（`cdc.enable: true` 后）**：CDC 仪表盘点「启动 CDC / 停止 CDC」按钮即可启停增量同步，无需 SSH/CLI——CDC 进程由 Web supervisor 管理（崩溃指数退避自动重启、SIGTERM→SIGKILL 优雅停止、Web 重启领养在跑的 CDC）。`/cdc/status` 返回 supervisor 控制态（running/starting/stopping/failed/adopted + PID/重启次数）。设计见 [docs/cdc-web-control-design.md](docs/cdc-web-control-design.md)。
+
+**DDL 复制（`cdc.sync_ddl`，默认 `true`）**：启用 CDC 后，源端的 `CREATE/ALTER/DROP TABLE`（及 BTREE 索引）会自动复制到 TiDB（PG→TiDB 类型映射 + PG schema 前缀去除 + `IF NOT EXISTS` 幂等 + `ddl_log` id checkpoint 的 at-least-once）。视图/函数/触发器等不兼容 DDL 跳过+告警，不阻断。`sync_ddl: false` 时仅复制 DML（面向已预先全量迁移的 schema）。新表的 DML 若先于其 DDL 到达，applier 会短退避重试等 DDL 落地，超限 halt（不静默丢）。
 
 > ⚠️ **升级提示（行为变更）**：CDC 的同步表清单现从 `cdc.tables` 读取（原从 `migration.tables`）。若你此前依赖 `migration.tables` 过滤 CDC 同步范围，请将其复制到 `cdc.tables`。`cdc.tables` 为空表示同步全部表。
 
-CDC 功能细节（INSERT/UPDATE/DELETE、事务顺序性、checkpoint-on-failure、无 PK 表 halt、Web 只读监控）见 [docs/cdc-web-monitoring-contract.md](docs/cdc-web-monitoring-contract.md)；可选化改造设计见 [docs/cdc-optional-module-design.md](docs/cdc-optional-module-design.md)。
+CDC 功能细节（INSERT/UPDATE/DELETE、事务顺序性、checkpoint-on-failure、无 PK 表 halt、Web 一键启停 + 只读监控）见 [docs/cdc-web-monitoring-contract.md](docs/cdc-web-monitoring-contract.md)；可选化设计见 [docs/cdc-optional-module-design.md](docs/cdc-optional-module-design.md)，一键启停设计见 [docs/cdc-web-control-design.md](docs/cdc-web-control-design.md)，DDL 复制设计见 [docs/cdc-ddl-replication-design.md](docs/cdc-ddl-replication-design.md)。
 
 ---
 
@@ -815,7 +817,7 @@ cd web/frontend && npm run dev
 A: PostgreSQL 10+ 版本。
 
 **Q: 支持增量同步吗？**
-A: 支持，但 CDC 增量同步是**可选模块、默认关闭**（`cdc.enable: false`）；需零停机增量同步时显式开启（`cdc.enable: true` / `--enable-cdc` / `PG2TIDB_CDC_FORCE=1`，见 [CDC 增量同步（可选模块）](#cdc-增量同步可选模块)）。开启后通过 `pg2tidb cdc` 运行，覆盖 INSERT/UPDATE/DELETE、事务顺序性、NULL/特殊字符/TOAST；带 checkpoint-on-failure 防丢数据（at-least-once 重启重读）+ 无 PK 表结构性 halt。Web 端有只读 CDC 监控仪表盘（`pg2tidb web`，读 CDC 状态文件，见 [docs/cdc-web-monitoring-contract.md](docs/cdc-web-monitoring-contract.md)）。
+A: 支持，但 CDC 增量同步是**可选模块、默认关闭**（`cdc.enable: false`）；需零停机增量同步时显式开启（`cdc.enable: true` / `--enable-cdc` / `PG2TIDB_CDC_FORCE=1`，见 [CDC 增量同步（可选模块）](#cdc-增量同步可选模块)）。开启后通过 `pg2tidb cdc` 运行（或 Web 仪表盘「启动 CDC」一键启停），覆盖 INSERT/UPDATE/DELETE、事务顺序性、NULL/特殊字符/TOAST；`sync_ddl: true`（默认）同时复制源端 DDL（CREATE/ALTER/DROP TABLE + 类型映射）；带 checkpoint-on-failure 防丢数据（at-least-once 重启重读）+ 无 PK 表结构性 halt。Web 端有 CDC 监控仪表盘（`pg2tidb web`，一键启停 + 实时状态/LSN/吞吐，见 [docs/cdc-web-monitoring-contract.md](docs/cdc-web-monitoring-contract.md)）。
 
 **Q: 大表迁移性能如何？**
 A: PG 导出通常 50-200 MB/s，TiDB Lightning 导入 200-500 MB/s，整体瓶颈通常在 PG 导出端。
