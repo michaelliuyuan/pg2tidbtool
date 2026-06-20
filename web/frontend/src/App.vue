@@ -25,6 +25,7 @@ onMounted(async () => {
       <el-menu
         :default-active="route.path"
         mode="horizontal"
+        :ellipsis="false"
         background-color="#1a1a2e"
         text-color="#ccc"
         active-text-color="#409eff"
