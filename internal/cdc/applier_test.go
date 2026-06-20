@@ -1,6 +1,7 @@
 package cdc
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -112,6 +113,25 @@ func TestIsSchemaError(t *testing.T) {
 type testError struct{ msg string }
 
 func (e *testError) Error() string { return e.msg }
+
+// TestApplyEvent_SkipsInternalTable: CDC's own infra tables (pg2tidb_ddl_log)
+// must be skipped, never replicated — a FOR ALL TABLES publication streams their
+// writes, but they don't exist on the target (1146 halt). #t61.
+func TestApplyEvent_SkipsInternalTable(t *testing.T) {
+	a := NewApplier(nil, DefaultBatchConfig(), NewTransformer(DefaultTransformerConfig()))
+	err := a.applyEvent(context.Background(), &CDCEvent{
+		Kind:    EventInsert,
+		Schema:  "public",
+		Table:   "pg2tidb_ddl_log",
+		Columns: []ColumnValue{{Name: "id", Value: "1", Type: "oid_23"}},
+	})
+	if err != nil {
+		t.Fatalf("internal-table DML must be skipped (nil err), got: %v", err)
+	}
+	if got := a.stats.EventsSkipped; got != 1 {
+		t.Errorf("EventsSkipped = %d, want 1 (internal table skipped)", got)
+	}
+}
 
 func TestBatchConfigDefaults(t *testing.T) {
 	cfg := DefaultBatchConfig()
