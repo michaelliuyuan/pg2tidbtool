@@ -98,3 +98,26 @@ func TestShouldApplyDDL(t *testing.T) {
 		}
 	}
 }
+
+// TestTransformTableDDL_SchemaStrip: PG schema qualifiers (schema.table) are
+// stripped from CREATE/ALTER/DROP so the table lands in the connected target
+// database (TiDB has no schemas). #t61.
+func TestTransformTableDDL_SchemaStrip(t *testing.T) {
+	dt := NewDDLTransformer()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"CREATE strips public.", "CREATE TABLE public.foo (id SERIAL)", "CREATE TABLE IF NOT EXISTS foo (id BIGINT AUTO_INCREMENT)"},
+		{"ALTER strips schema.", "ALTER TABLE myschema.foo ADD COLUMN c INT", "ALTER TABLE foo ADD COLUMN c INT"},
+		{"DROP strips public.", "DROP TABLE public.foo", "DROP TABLE IF EXISTS foo"},
+		{"unqualified CREATE unchanged", "CREATE TABLE foo (id SERIAL)", "CREATE TABLE IF NOT EXISTS foo (id BIGINT AUTO_INCREMENT)"},
+	}
+	for _, c := range cases {
+		got := dt.Transform(c.in, "table")
+		if got != c.want {
+			t.Errorf("%s:\n  got:  %s\n  want: %s", c.name, got, c.want)
+		}
+	}
+}

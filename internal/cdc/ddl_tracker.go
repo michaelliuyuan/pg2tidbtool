@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -132,7 +133,7 @@ func (t *DDLTracker) SetupEventTrigger(ctx context.Context) error {
 					INSERT INTO pg2tidb_ddl_log (ddl_time, schema_name, object_name,
 						object_type, ddl_command, txid)
 					VALUES (now(), r.schema_name, r.object_name, r.object_type,
-						'DROP TABLE ' || quote_ident(r.schema_name) || '.' || quote_ident(r.object_name),
+						'DROP TABLE ' || quote_ident(r.object_name),
 						txid_current());
 				END IF;
 			END LOOP;
@@ -276,6 +277,15 @@ func (dt *DDLTransformer) Transform(ddl string, objectType string) string {
 	}
 }
 
+// ddlTableSchemaPrefixRe matches a PG schema qualifier on the leading table
+// reference of a CREATE/ALTER/DROP TABLE statement (e.g. "public." in
+// "CREATE TABLE public.foo"). TiDB has no schemas (only databases), so a PG
+// schema qualifier would be read as a *database* name and land in the wrong
+// place; it must be stripped so the table goes into the connected target
+// database — matching the DML side's quotedTable (unqualified name). Group 1
+// preserves the verb + optional IF [NOT] EXISTS (added by makeDDLIdempotent).
+var ddlTableSchemaPrefixRe = regexp.MustCompile(`(?i)^((?:CREATE|ALTER|DROP)\s+TABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?)(?:"[a-zA-Z0-9_]+"|[a-zA-Z_][a-zA-Z0-9_]*)\.`)
+
 func (dt *DDLTransformer) transformTableDDL(ddl string) string {
 	// Cheap at-least-once idempotency (#t59 §4.2): CREATE/DROP get IF NOT
 	// EXISTS / IF EXISTS so a replayed DDL doesn't error. ALTER is not
@@ -313,6 +323,12 @@ func (dt *DDLTransformer) transformTableDDL(ddl string) string {
 		ddl = strings.ReplaceAll(ddl, "USING HASH", "")
 		ddl = strings.ReplaceAll(ddl, "USING hash", "")
 	}
+
+	// Strip PG schema qualifier (schema.table → table): TiDB has no schemas, so a
+	// PG "public.foo" is read as database "public" and lands in the wrong place.
+	// Applied uniformly to CREATE/ALTER/DROP, matching the DML side's quotedTable
+	// (unqualified → target database). #t61.
+	ddl = ddlTableSchemaPrefixRe.ReplaceAllString(ddl, "${1}")
 
 	return ddl
 }
