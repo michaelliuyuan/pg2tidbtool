@@ -101,7 +101,7 @@ func (t *DDLTracker) SetupEventTrigger(ctx context.Context) error {
 		return fmt.Errorf("create ddl log table: %w", err)
 	}
 
-	// Create the event trigger
+	// Create the event trigger (ddl_command_end captures CREATE/ALTER).
 	_, err = t.db.ExecContext(ctx, `
 		DROP EVENT TRIGGER IF EXISTS pg2tidb_ddl_trigger;
 		CREATE EVENT TRIGGER pg2tidb_ddl_trigger
@@ -112,19 +112,67 @@ func (t *DDLTracker) SetupEventTrigger(ctx context.Context) error {
 		return fmt.Errorf("create event trigger: %w", err)
 	}
 
+	// DROP commands are NOT surfaced by pg_event_trigger_ddl_commands() at
+	// ddl_command_end — PG exposes dropped objects only via the sql_drop event +
+	// pg_event_trigger_dropped_objects(). Without this, DROP TABLE is never
+	// captured and the target schema drifts (#t61). For each dropped TABLE we
+	// synthesize a clean `DROP TABLE <schema>.<name>` (CASCADE sub-objects —
+	// sequences/indexes/constraints — are not logged; the table DROP cascades
+	// on the target). shouldApplyDDL routes DROP TABLE → table → apply.
+	_, err = t.db.ExecContext(ctx, `
+		CREATE OR REPLACE FUNCTION pg2tidb_ddl_drop_capture()
+		RETURNS event_trigger
+		LANGUAGE plpgsql AS $$
+		DECLARE
+			r RECORD;
+		BEGIN
+			FOR r IN SELECT * FROM pg_event_trigger_dropped_objects()
+			LOOP
+				IF r.object_type = 'table' THEN
+					INSERT INTO pg2tidb_ddl_log (ddl_time, schema_name, object_name,
+						object_type, ddl_command, txid)
+					VALUES (now(), r.schema_name, r.object_name, r.object_type,
+						'DROP TABLE ' || quote_ident(r.schema_name) || '.' || quote_ident(r.object_name),
+						txid_current());
+				END IF;
+			END LOOP;
+		END;
+		$$;
+	`)
+	if err != nil {
+		return fmt.Errorf("create ddl drop capture function: %w", err)
+	}
+	_, err = t.db.ExecContext(ctx, `
+		DROP EVENT TRIGGER IF EXISTS pg2tidb_ddl_drop_trigger;
+		CREATE EVENT TRIGGER pg2tidb_ddl_drop_trigger
+		ON sql_drop
+		EXECUTE FUNCTION pg2tidb_ddl_drop_capture();
+	`)
+	if err != nil {
+		return fmt.Errorf("create sql_drop event trigger: %w", err)
+	}
+
 	t.log.Info("ddl tracker: event trigger setup complete")
 	return nil
 }
 
-// TeardownEventTrigger removes the event trigger and log table.
+// TeardownEventTrigger removes the event triggers and capture functions.
 func (t *DDLTracker) TeardownEventTrigger(ctx context.Context) error {
 	_, err := t.db.ExecContext(ctx, `DROP EVENT TRIGGER IF EXISTS pg2tidb_ddl_trigger;`)
 	if err != nil {
 		t.log.Warn("drop event trigger", zap.Error(err))
 	}
+	_, err = t.db.ExecContext(ctx, `DROP EVENT TRIGGER IF EXISTS pg2tidb_ddl_drop_trigger;`)
+	if err != nil {
+		t.log.Warn("drop sql_drop event trigger", zap.Error(err))
+	}
 	_, err = t.db.ExecContext(ctx, `DROP FUNCTION IF EXISTS pg2tidb_ddl_capture();`)
 	if err != nil {
 		t.log.Warn("drop event trigger function", zap.Error(err))
+	}
+	_, err = t.db.ExecContext(ctx, `DROP FUNCTION IF EXISTS pg2tidb_ddl_drop_capture();`)
+	if err != nil {
+		t.log.Warn("drop sql_drop event trigger function", zap.Error(err))
 	}
 	return nil
 }
