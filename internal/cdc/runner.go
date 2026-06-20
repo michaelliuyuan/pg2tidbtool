@@ -399,6 +399,16 @@ func (r *Runner) runDDLPoller(ctx context.Context, targetDB *sql.DB, errCh chan<
 				r.checkpoint.SetLastDDLID(e.ID)
 				continue
 			}
+			if !shouldApplyDDL(e) {
+				// Piggybacked sub-object (e.g. the sequence/PK-index rows of a
+				// CREATE TABLE ... SERIAL) or out-of-scope statement — skip so we
+				// don't re-apply the parent statement and diverge. #t61.
+				r.log.Info("cdc runner: ddl skipped (sub-object/out-of-scope)",
+					zap.String("type", e.ObjectType), zap.String("ddl", e.DDL))
+				lastID = e.ID
+				r.checkpoint.SetLastDDLID(e.ID)
+				continue
+			}
 			if _, err := targetDB.ExecContext(ctx, ddl); err != nil {
 				r.log.Error("cdc runner: ddl apply failed; halting",
 					zap.Int64("id", e.ID), zap.String("ddl", ddl), zap.Error(err))

@@ -68,3 +68,33 @@ func TestCheckpoint_LastDDLID(t *testing.T) {
 		t.Errorf("GetLastDDLID after reload = %d, want 42 (must persist)", got)
 	}
 }
+
+// TestShouldApplyDDL covers #t61: PG ddl_command_end fires once per sub-object,
+// all carrying the parent statement. Only the entry whose object type matches
+// the statement's primary kind is applied; piggybacked sub-objects (sequence,
+// a table's PK index) are skipped. A standalone CREATE INDEX is still applied.
+func TestShouldApplyDDL(t *testing.T) {
+	createTable := "CREATE TABLE cdc_ddl_e2e (id SERIAL PRIMARY KEY, j JSONB)"
+	cases := []struct {
+		name string
+		e    DDLEntry
+		want bool
+	}{
+		{"table row of CREATE TABLE", DDLEntry{DDL: createTable, ObjectType: "table"}, true},
+		{"sequence sub-object of CREATE TABLE", DDLEntry{DDL: createTable, ObjectType: "sequence"}, false},
+		{"PK-index sub-object of CREATE TABLE", DDLEntry{DDL: createTable, ObjectType: "index"}, false},
+		{"standalone CREATE INDEX", DDLEntry{DDL: "CREATE INDEX idx ON t (c)", ObjectType: "index"}, true},
+		{"standalone CREATE UNIQUE INDEX", DDLEntry{DDL: "CREATE UNIQUE INDEX uq ON t (c)", ObjectType: "index"}, true},
+		{"standalone DROP INDEX", DDLEntry{DDL: "DROP INDEX idx", ObjectType: "index"}, true},
+		{"ALTER TABLE ADD COLUMN", DDLEntry{DDL: "ALTER TABLE t ADD COLUMN c INT", ObjectType: "table"}, true},
+		{"DROP TABLE", DDLEntry{DDL: "DROP TABLE t", ObjectType: "table"}, true},
+		{"standalone CREATE SEQUENCE", DDLEntry{DDL: "CREATE SEQUENCE s", ObjectType: "sequence"}, false},
+		{"object-type case-insensitive", DDLEntry{DDL: createTable, ObjectType: "TABLE"}, true},
+	}
+	for _, c := range cases {
+		if got := shouldApplyDDL(c.e); got != c.want {
+			t.Errorf("%s: shouldApplyDDL = %v, want %v (ddl=%q type=%q)",
+				c.name, got, c.want, c.e.DDL, c.e.ObjectType)
+		}
+	}
+}

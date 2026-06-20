@@ -180,6 +180,34 @@ func (t *DDLTracker) RecentDDL(n int) []DDLEntry {
 	return t.ddlLog[len(t.ddlLog)-n:]
 }
 
+// shouldApplyDDL reports whether a captured DDL entry should be applied to the
+// target. PG's ddl_command_end fires once per affected sub-object: a
+// `CREATE TABLE ... SERIAL PRIMARY KEY` emits rows for the sequence, the table,
+// AND the PK index — all carrying the same CREATE TABLE query. Only the entry
+// whose object type is the statement's primary object is applied; piggybacked
+// sub-objects are skipped (sequences → TiDB column AUTO_INCREMENT; a table's PK
+// index → created with the table). A standalone CREATE INDEX (its own
+// statement, object_type=index) IS applied. #t61.
+func shouldApplyDDL(e DDLEntry) bool {
+	ot := strings.ToUpper(e.ObjectType)
+	if ot == "SEQUENCE" {
+		return false // PG sequence → TiDB AUTO_INCREMENT; never replicate
+	}
+	ddl := strings.ToUpper(strings.TrimSpace(e.DDL))
+	switch {
+	case strings.HasPrefix(ddl, "CREATE TABLE"),
+		strings.HasPrefix(ddl, "ALTER TABLE"),
+		strings.HasPrefix(ddl, "DROP TABLE"):
+		return ot == "TABLE" // a sequence/index row riding a TABLE stmt → skip
+	case strings.HasPrefix(ddl, "CREATE UNIQUE INDEX"),
+		strings.HasPrefix(ddl, "CREATE INDEX"),
+		strings.HasPrefix(ddl, "DROP INDEX"):
+		return ot == "INDEX" // standalone index DDL → apply; non-index row → skip
+	}
+	// Other statement shapes (e.g. CREATE SEQUENCE) → out of scope; skip.
+	return false
+}
+
 // Transform converts a PG DDL statement to TiDB-compatible DDL.
 func (dt *DDLTransformer) Transform(ddl string, objectType string) string {
 	ddl = strings.TrimSpace(ddl)
