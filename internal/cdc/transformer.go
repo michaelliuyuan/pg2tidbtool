@@ -182,6 +182,16 @@ func (t *Transformer) formatValue(col ColumnValue) string {
 		return "NULL"
 	}
 
+	// BYTEA (PG oid 17): pgoutput sends PG's hex text repr ("\xdeadbeef").
+	// Render as a MySQL hex literal (X'deadbeef') so TiDB BLOB stores the raw
+	// bytes, not the textual "\x..." representation. #t61 E2E finding.
+	if col.Type == "oid_17" {
+		if hex, ok := parseByteaHex(col.Value); ok {
+			return "X'" + hex + "'"
+		}
+		// Non-hex (escape format, unusual) → fall through to string rendering.
+	}
+
 	str := fmt.Sprintf("%v", col.Value)
 
 	// Truncate if configured
@@ -199,6 +209,21 @@ func (t *Transformer) formatValue(col ColumnValue) string {
 	escaped = strings.ReplaceAll(escaped, `'`, `''`)
 
 	return fmt.Sprintf("'%s'", escaped)
+}
+
+// parseByteaHex extracts the hex digits from PG's bytea hex text repr
+// ("\xdeadbeef" → "deadbeef") for a MySQL X'...' literal. Returns ok=false for
+// values not in the \x hex format (PG 9+ default); the legacy escape format is
+// left to ordinary string rendering. #t61.
+func parseByteaHex(v interface{}) (string, bool) {
+	s, ok := v.(string)
+	if !ok {
+		return "", false
+	}
+	if !strings.HasPrefix(s, `\x`) {
+		return "", false
+	}
+	return strings.ToLower(s[2:]), true
 }
 
 // quotedTable returns a fully-qualified table name with MySQL quoting.

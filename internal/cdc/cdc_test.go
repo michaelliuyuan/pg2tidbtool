@@ -301,7 +301,7 @@ func TestNullInsertRoundTrip(t *testing.T) {
 
 // TestUpdateUnchangedTOAST guards the 'u' (unchanged TOAST) fix: an UPDATE
 // whose new image marks a column 'u' (value not sent) must DROP that column
-// from SET, never render it as ''/NULL (which would clobber an unchanged value).
+// from SET, never render it as ”/NULL (which would clobber an unchanged value).
 func TestUpdateUnchangedTOAST(t *testing.T) {
 	tr := NewTransformer(DefaultTransformerConfig())
 
@@ -475,6 +475,41 @@ func TestTransformer_SpecialChars(t *testing.T) {
 	expected := "REPLACE INTO `users` (`id`, `bio`) VALUES ('1', 'It''s a \"test\"')"
 	if sql != expected {
 		t.Errorf("got:\n  %s\nwant:\n  %s", sql, expected)
+	}
+}
+
+// TestTransformer_ByteAValue: pgoutput sends BYTEA as PG hex text ("\xdeadbeef");
+// the transformer must render it as a MySQL hex literal X'deadbeef' so TiDB BLOB
+// stores raw bytes, not the textual representation. #t61.
+func TestTransformer_ByteAValue(t *testing.T) {
+	tr := NewTransformer(DefaultTransformerConfig())
+
+	event := &CDCEvent{
+		Kind:   EventInsert,
+		Schema: "public",
+		Table:  "blobs",
+		Columns: []ColumnValue{
+			{Name: "id", Value: "1", Type: "oid_23"},
+			{Name: "b", Value: `\xdeadbeef`, Type: "oid_17"}, // BYTEA
+		},
+	}
+
+	sql, err := tr.TransformEvent(event)
+	if err != nil {
+		t.Fatalf("TransformEvent(bytea): %v", err)
+	}
+	expected := "REPLACE INTO `blobs` (`id`, `b`) VALUES ('1', X'deadbeef')"
+	if sql != expected {
+		t.Errorf("got:\n  %s\nwant:\n  %s", sql, expected)
+	}
+
+	// Empty bytea → X'' (zero-length binary), not the empty-string ''.
+	if got := tr.formatValue(ColumnValue{Name: "b", Value: `\x`, Type: "oid_17"}); got != "X''" {
+		t.Errorf("empty bytea: got %q, want X''", got)
+	}
+	// Non-BYTEA text is unaffected.
+	if got := tr.formatValue(ColumnValue{Name: "t", Value: "hello", Type: "oid_25"}); got != "'hello'" {
+		t.Errorf("text: got %q, want 'hello'", got)
 	}
 }
 
